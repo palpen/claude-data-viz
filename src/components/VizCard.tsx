@@ -1,0 +1,79 @@
+import { clsx } from "clsx";
+import { formatDistanceToNow } from "date-fns";
+import { FileImage, FileText, Code2, FileQuestion, MessageSquare } from "lucide-react";
+import { convertFileSrc } from "../lib/tauri";
+import type { VizItem } from "../types";
+import { isImageKind, kindLabel } from "../lib/mime";
+
+const iconForKind = (kind: VizItem["kind"]) => {
+  if (isImageKind(kind) || kind === "svg") return FileImage;
+  if (kind === "html") return Code2;
+  if (kind === "pdf") return FileText;
+  return FileQuestion;
+};
+
+function basename(p: string): string {
+  const parts = p.split("/");
+  return parts[parts.length - 1] || p;
+}
+
+export function VizCard({
+  item,
+  selected,
+  onClick,
+}: {
+  item: VizItem;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const Icon = iconForKind(item.kind);
+  const isImage = isImageKind(item.kind) || item.kind === "svg";
+  const isDeleted = item.status === "deleted";
+
+  return (
+    <button
+      onClick={onClick}
+      className={clsx(
+        "w-full text-left p-2 flex gap-2.5 rounded transition-colors border",
+        selected
+          ? "bg-[color:var(--color-accent)]/10 border-[color:var(--color-accent)]/40"
+          : "bg-transparent border-transparent hover:bg-[color:var(--color-surface-2)] hover:border-[color:var(--color-border)]",
+        isDeleted && "opacity-40"
+      )}
+    >
+      <div className="w-12 h-12 flex-shrink-0 rounded bg-[color:var(--color-surface-2)] border border-[color:var(--color-border)] overflow-hidden flex items-center justify-center">
+        {isImage ? (
+          <img
+            src={`${convertFileSrc(item.abs_path)}?v=${item.mtime}`}
+            alt=""
+            className="w-full h-full object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <Icon className="w-5 h-5 opacity-50" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        {item.prompt ? (
+          <div className="text-[12px] truncate text-[color:var(--color-text)] flex items-center gap-1">
+            <MessageSquare className="w-3 h-3 text-[color:var(--color-accent)] flex-shrink-0" />
+            <span className="truncate">{item.prompt}</span>
+          </div>
+        ) : (
+          <div className="text-[12px] truncate text-[color:var(--color-text-dim)] italic">
+            no prompt linked
+          </div>
+        )}
+        <div className="text-[11px] text-[color:var(--color-text-dim)] truncate font-mono mt-0.5">
+          {basename(item.rel_path)}
+        </div>
+        <div className="text-[10px] text-[color:var(--color-text-dim)] truncate flex gap-1.5 items-center mt-0.5 opacity-70">
+          <span className="uppercase tracking-wide">{kindLabel(item.kind)}</span>
+          <span>·</span>
+          <span>{formatDistanceToNow(item.mtime, { addSuffix: true })}</span>
+          {isDeleted && <span className="text-red-400">· deleted</span>}
+        </div>
+      </div>
+    </button>
+  );
+}
