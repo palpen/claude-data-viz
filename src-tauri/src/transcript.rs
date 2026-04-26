@@ -516,6 +516,41 @@ fn truncate_output(s: String) -> String {
     s[start..].to_string()
 }
 
+/// Substring search with simple word-boundary semantics on byte boundaries.
+///
+/// A "body" byte is `[A-Za-z0-9_.-]`. A match counts only when both the byte
+/// before and the byte after the match are NOT body bytes (or the match sits
+/// at the start/end of the haystack). Operating on bytes is safe here because
+/// non-ASCII UTF-8 continuation bytes all have the high bit set and are
+/// therefore not in the body set, so multi-byte basenames still get a clean
+/// boundary check on either side.
+fn contains_as_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let hb = haystack.as_bytes();
+    let nb = needle.as_bytes();
+    if nb.len() > hb.len() {
+        return false;
+    }
+    let is_body = |b: u8| -> bool {
+        b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-'
+    };
+    let mut i = 0;
+    while i + nb.len() <= hb.len() {
+        if &hb[i..i + nb.len()] == nb {
+            let left_ok = i == 0 || !is_body(hb[i - 1]);
+            let right_idx = i + nb.len();
+            let right_ok = right_idx == hb.len() || !is_body(hb[right_idx]);
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 fn tool_mentions_path(tool: &ToolEntry, abs_path: &str) -> bool {
     // Strongest signal: explicit file_path input on Write/Edit-style tools.
     if let Some(fp) = tool.input.get("file_path").and_then(|v| v.as_str()) {
@@ -531,7 +566,7 @@ fn tool_mentions_path(tool: &ToolEntry, abs_path: &str) -> bool {
             }
             if let Some(base) = std::path::Path::new(abs_path).file_name().and_then(|n| n.to_str())
             {
-                if cmd.contains(base) {
+                if contains_as_word(cmd, base) {
                     return true;
                 }
             }
@@ -544,7 +579,7 @@ fn tool_mentions_path(tool: &ToolEntry, abs_path: &str) -> bool {
             return true;
         }
         if let Some(base) = std::path::Path::new(abs_path).file_name().and_then(|n| n.to_str()) {
-            if output.contains(base) {
+            if contains_as_word(output, base) {
                 return true;
             }
         }
@@ -823,6 +858,83 @@ mod tests {
         let mut t = mk_tool("Bash", 0, "x", json!({"command": "python plot.py"}), None);
         t.result_output = Some("matplotlib: written to plot.png".into());
         assert!(tool_mentions_path(&t, "/tmp/plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_substring_does_not_match() {
+        // `myout.png` should not match `out.png` (left side is alphanumeric).
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cp myout.png /backup/"}), None);
+        assert!(!tool_mentions_path(&t, "/work/out.png"));
+        // `out.png.bak` should not match `out.png` (right side is `.`, part of body).
+        let t = mk_tool("Bash", 0, "x", json!({"command": "rm out.png.bak"}), None);
+        assert!(!tool_mentions_path(&t, "/work/out.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_substring_in_result_output_does_not_match() {
+        let mut t = mk_tool("Bash", 0, "x", json!({"command": "python plot.py"}), None);
+        t.result_output = Some("found myout.png and out.png.bak".into());
+        assert!(!tool_mentions_path(&t, "/work/out.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_inside_path_segment_does_not_match() {
+        // `/data/a.csv.gz` should not match `/work/a.csv`.
+        let t = mk_tool("Bash", 0, "x", json!({"command": "gunzip /data/a.csv.gz"}), None);
+        assert!(!tool_mentions_path(&t, "/work/a.csv"));
+    }
+
+    #[test]
+    fn tool_mentions_path_matplotlib_stdout_basename_still_matches() {
+        // Regression guard: classic matplotlib stdout still matches via basename.
+        let mut t = mk_tool("Bash", 0, "x", json!({"command": "python plot.py"}), None);
+        t.result_output = Some("Saved figure to plot.png".into());
+        assert!(tool_mentions_path(&t, "/cwd/plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_at_string_start_matches() {
+        let t = mk_tool("Bash", 0, "x", json!({"command": "plot.png"}), None);
+        assert!(tool_mentions_path(&t, "/cwd/plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_at_string_end_matches() {
+        let mut t = mk_tool("Bash", 0, "x", json!({"command": "python plot.py"}), None);
+        t.result_output = Some("Wrote plot.png".into());
+        assert!(tool_mentions_path(&t, "/cwd/plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_quoted_matches() {
+        let t = mk_tool("Bash", 0, "x", json!({"command": "open \"plot.png\""}), None);
+        assert!(tool_mentions_path(&t, "/cwd/plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_dotfile_basename() {
+        // `.env` should match a real `.env` reference.
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cat .env"}), None);
+        assert!(tool_mentions_path(&t, "/proj/.env"));
+        // But `my.env` should not match `.env` (left side is alphanumeric).
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cat my.env"}), None);
+        assert!(!tool_mentions_path(&t, "/proj/.env"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_with_space() {
+        let t = mk_tool("Bash", 0, "x", json!({"command": "open \"my plot.png\""}), None);
+        assert!(tool_mentions_path(&t, "/cwd/my plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_unicode_basename() {
+        // Non-ASCII basename should still match when word-bounded.
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cat sín.png"}), None);
+        assert!(tool_mentions_path(&t, "/cwd/sín.png"));
+        // But `sín.png.bak` should not match `sín.png`.
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cat sín.png.bak"}), None);
+        assert!(!tool_mentions_path(&t, "/cwd/sín.png"));
     }
 
     #[test]
