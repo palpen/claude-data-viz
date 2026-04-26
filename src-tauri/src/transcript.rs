@@ -333,7 +333,14 @@ fn scan_active_jsonls() -> Vec<PathBuf> {
 pub(crate) fn process_line(index: &SharedIndex, line: &str) {
     let envelope: RawEnvelope = match serde_json::from_str(line) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                line_preview = %line.chars().take(120).collect::<String>(),
+                "transcript: malformed JSONL line"
+            );
+            return;
+        }
     };
     let ts_ms = envelope
         .timestamp
@@ -1103,5 +1110,13 @@ mod tests {
         });
         // mtime - ts = 60s > 30s window
         assert!(idx.lookup(60_000, "/tmp/p.png").is_none());
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn process_line_warns_on_malformed_json() {
+        let index = new_index();
+        process_line(&index, "{not json");
+        assert!(logs_contain("transcript: malformed JSONL line"));
     }
 }
