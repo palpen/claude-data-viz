@@ -46,6 +46,12 @@ data-encoding = "2"
 [dev-dependencies]
 tempfile = "3"
 
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tracing-test = "0.2"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
