@@ -137,6 +137,7 @@ pub fn run() {
             commands::probe_ssh_agent,
             commands::list_ssh_hosts,
             commands::test_ssh_connection,
+            commands::confirm_unknown_host,
             commands::add_remote_watch,
             commands::fetch_remote_file,
             commands::get_watch_status,

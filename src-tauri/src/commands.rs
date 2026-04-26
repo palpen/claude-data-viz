@@ -424,6 +424,71 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
     }
 }
 
+#[derive(Deserialize)]
+pub struct ConfirmUnknownHostArgs {
+    pub host: String,
+    pub port: u16,
+    /// Fingerprint the user just confirmed in the dialog. We re-probe and compare to
+    /// guard against a key change between probe-show-confirm.
+    pub expected_fingerprint: String,
+}
+
+/// Append the host's currently-presented key to ~/.ssh/known_hosts after re-confirming the
+/// fingerprint hasn't changed since the user clicked Trust. Idempotent: if the same key has
+/// already been learned (race with another `ssh` invocation, or two open dialogs), returns Ok.
+#[tauri::command]
+pub async fn confirm_unknown_host(args: ConfirmUnknownHostArgs) -> Result<(), String> {
+    // Re-probe live key so a swap between Test and Confirm doesn't slip through.
+    let live_key = connection::probe_host_key(&args.host, args.port)
+        .await
+        .map_err(|e| format!("re-probe failed: {e}"))?;
+    let live_fp = known_hosts::fingerprint(&live_key);
+    if live_fp != args.expected_fingerprint {
+        return Err(format!(
+            "fingerprint changed since you clicked Trust ({} → {}). Aborting — try again.",
+            args.expected_fingerprint, live_fp
+        ));
+    }
+
+    // Re-verify against known_hosts. If the user (or another tool) already trusted this in
+    // a parallel terminal, our work is done.
+    let files = known_hosts::default_files();
+    let paths: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
+    match known_hosts::verify_host(&paths, &args.host, args.port, &live_key) {
+        known_hosts::HostVerdict::Match => return Ok(()),
+        known_hosts::HostVerdict::Mismatch { line_no, file } => {
+            return Err(format!(
+                "known_hosts now has a conflicting key for {} at {}:{} — refusing to overwrite. Run `ssh-keygen -R '{}'` to clear stale entries.",
+                args.host,
+                file.display(),
+                line_no,
+                args.host
+            ));
+        }
+        known_hosts::HostVerdict::Revoked { line_no, file } => {
+            return Err(format!(
+                "known_hosts revokes this host at {}:{} — refusing to trust.",
+                file.display(),
+                line_no
+            ));
+        }
+        known_hosts::HostVerdict::Absent => {}
+    }
+
+    // Append to the primary file (~/.ssh/known_hosts).
+    let primary = files.first().ok_or_else(|| {
+        "no HOME directory available to locate ~/.ssh/known_hosts".to_string()
+    })?;
+    known_hosts::learn_host(primary, &args.host, args.port, &live_key).map_err(|e| match e {
+        known_hosts::LearnError::Conflict(line) => format!(
+            "another entry for this host appeared at line {line} since the probe. Run `ssh-keygen -R '{}'` and try again.",
+            args.host
+        ),
+        other => format!("write known_hosts: {other}"),
+    })?;
+    Ok(())
+}
+
 /// Read the known_hosts file containing the conflict line and compute the fingerprint of the
 /// stored key on that line. Best-effort — returns None on any parse failure so the UI just
 /// shows a placeholder.
