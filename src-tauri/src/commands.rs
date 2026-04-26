@@ -60,6 +60,35 @@ pub fn add_local_watch(
     Ok(watch)
 }
 
+/// Re-run a local watch's cold scan (file enumeration + dedupe). For SSH watches this is a
+/// no-op — the SFTP poller already scans on its own cadence and a one-shot extra pass would
+/// race with it. Errors are swallowed and surfaced via existing event channels.
+#[tauri::command]
+pub async fn rescan_watch(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    watch_id: String,
+) -> Result<(), String> {
+    let source = state
+        .watches
+        .lock()
+        .iter()
+        .find(|w| w.id == watch_id)
+        .map(|w| w.source.clone());
+    let Some(source) = source else {
+        return Err(format!("watch {watch_id} not found"));
+    };
+    if let WatchSource::Local { path } = source {
+        let root = PathBuf::from(path);
+        if !root.is_dir() {
+            return Err("watch path is not a directory".into());
+        }
+        let state_clone = state.inner().clone();
+        fs_watcher::cold_scan(&app, &state_clone, &watch_id, &root).await;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn remove_watch(app: AppHandle, state: State<Arc<AppState>>, watch_id: String) {
     fs_watcher::stop_watch(state.inner(), &watch_id);

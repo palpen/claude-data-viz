@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Plus, RefreshCw, Sparkles, Trash2, X, AlertTriangle } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { FolderOpen, RefreshCw, Server, Sparkles, Trash2, X, AlertTriangle } from "lucide-react";
 import { useVizStore } from "../store/vizStore";
 import { FollowToggle } from "./FollowToggle";
 import { ConnectRemoteDialog } from "./ConnectRemoteDialog";
@@ -9,12 +10,32 @@ import type { Watch, WatchStatus } from "../types";
 export function TopBar() {
   const watches = useVizStore((s) => s.watches);
   const watchStatus = useVizStore((s) => s.watchStatus);
+  const activeWatchId = useVizStore((s) => s.activeWatchId);
+  const setActiveWatchId = useVizStore((s) => s.setActiveWatchId);
   const followLatest = useVizStore((s) => s.followLatest);
   const toggleFollow = useVizStore((s) => s.toggleFollow);
+  const addWatch = useVizStore((s) => s.addWatch);
   const removeWatch = useVizStore((s) => s.removeWatch);
   const clearGalleryStore = useVizStore((s) => s.clearGallery);
 
   const [showRemote, setShowRemote] = useState(false);
+  const [addLocalErr, setAddLocalErr] = useState<string | null>(null);
+
+  const onAddLocal = async () => {
+    setAddLocalErr(null);
+    const path = await open({
+      directory: true,
+      multiple: false,
+      title: "Pick a folder to watch",
+    });
+    if (!path || typeof path !== "string") return;
+    try {
+      const watch = await tauri.addLocalWatch(path);
+      addWatch(watch);
+    } catch (e) {
+      setAddLocalErr(String(e));
+    }
+  };
 
   const onToggleFollow = () => {
     toggleFollow();
@@ -33,11 +54,35 @@ export function TopBar() {
         <span className="text-[13px] font-semibold tracking-wide">Claude Data Viz</span>
       </div>
       <div className="flex-1 flex items-center gap-1.5 overflow-x-auto">
+        {watches.length > 1 && (
+          <button
+            onClick={() => setActiveWatchId(null)}
+            title="Show items from all watches"
+            className={`flex items-center px-2 py-0.5 rounded text-[11px] flex-shrink-0 border ${
+              activeWatchId == null
+                ? "bg-[color:var(--color-accent)]/15 border-[color:var(--color-accent)]/50 text-[color:var(--color-text)]"
+                : "bg-[color:var(--color-surface-2)] border-[color:var(--color-border)] text-[color:var(--color-text-dim)] hover:text-[color:var(--color-text)]"
+            }`}
+          >
+            All
+          </button>
+        )}
         {watches.map((w) => (
           <WatchTab
             key={w.id}
             watch={w}
             status={watchStatus[w.id] ?? null}
+            active={activeWatchId === w.id}
+            onClick={() => {
+              const next = activeWatchId === w.id ? null : w.id;
+              setActiveWatchId(next);
+              // Focusing a tab is the user signaling "show me this folder now" — kick off
+              // a rescan so any files added since the last scan appear without a restart.
+              // No-op for SSH (the SFTP poller handles its own refresh cadence).
+              if (next === w.id && w.source.kind === "local") {
+                tauri.rescanWatch(w.id).catch(() => {});
+              }
+            }}
             onRemove={async () => {
               await tauri.removeWatch(w.id);
               removeWatch(w.id);
@@ -45,14 +90,30 @@ export function TopBar() {
           />
         ))}
         <button
-          onClick={() => setShowRemote(true)}
-          title="Add remote server"
+          onClick={onAddLocal}
+          title="Watch a local folder"
           className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] text-[color:var(--color-text-dim)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-surface-2)] border border-transparent hover:border-[color:var(--color-border)] flex-shrink-0"
         >
-          <Plus className="w-3 h-3" />
+          <FolderOpen className="w-3 h-3" />
+          local
+        </button>
+        <button
+          onClick={() => setShowRemote(true)}
+          title="Connect to a remote server"
+          className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] text-[color:var(--color-text-dim)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-surface-2)] border border-transparent hover:border-[color:var(--color-border)] flex-shrink-0"
+        >
+          <Server className="w-3 h-3" />
           remote
         </button>
       </div>
+      {addLocalErr && (
+        <span
+          className="text-[11px] text-red-300 truncate max-w-[260px]"
+          title={addLocalErr}
+        >
+          {addLocalErr}
+        </span>
+      )}
       <button
         onClick={onClear}
         title="Clear gallery"
@@ -70,22 +131,40 @@ export function TopBar() {
 function WatchTab({
   watch,
   status,
+  active,
+  onClick,
   onRemove,
 }: {
   watch: Watch;
   status: WatchStatus | null;
+  active: boolean;
+  onClick: () => void;
   onRemove: () => void;
 }) {
+  const label =
+    watch.source.kind === "local"
+      ? watch.source.path
+      : `${watch.source.user}@${watch.source.host}:${watch.source.remote_path}`;
   return (
-    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] bg-[color:var(--color-surface-2)] border border-[color:var(--color-border)] flex-shrink-0">
+    <div
+      className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] border flex-shrink-0 ${
+        active
+          ? "bg-[color:var(--color-accent)]/15 border-[color:var(--color-accent)]/50"
+          : "bg-[color:var(--color-surface-2)] border-[color:var(--color-border)]"
+      }`}
+    >
       {status && status.kind !== "connected" && (
         <StatusBadge status={status} watchId={watch.id} />
       )}
-      <span className="font-mono text-[color:var(--color-text-dim)] truncate max-w-[280px]">
-        {watch.source.kind === "local"
-          ? watch.source.path
-          : `${watch.source.user}@${watch.source.host}:${watch.source.remote_path}`}
-      </span>
+      <button
+        onClick={onClick}
+        title={active ? "Show all watches" : "Filter sidebar to this watch"}
+        className={`font-mono truncate max-w-[280px] hover:text-[color:var(--color-text)] ${
+          active ? "text-[color:var(--color-text)]" : "text-[color:var(--color-text-dim)]"
+        }`}
+      >
+        {label}
+      </button>
       <button
         onClick={onRemove}
         title="Stop watching"

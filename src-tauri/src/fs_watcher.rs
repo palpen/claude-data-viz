@@ -129,7 +129,7 @@ pub fn stop_watch(state: &Arc<AppState>, watch_id: &str) {
     }
 }
 
-async fn cold_scan(app: &AppHandle, state: &Arc<AppState>, watch_id: &str, root: &Path) {
+pub async fn cold_scan(app: &AppHandle, state: &Arc<AppState>, watch_id: &str, root: &Path) {
     let mut found: Vec<(PathBuf, std::fs::Metadata)> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -153,16 +153,9 @@ async fn cold_scan(app: &AppHandle, state: &Arc<AppState>, watch_id: &str, root:
         }
     }
 
-    // Cold-scan filter: only files modified in the last 24h, capped at 50 newest.
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let day_ago_ms = now_ms - 24 * 60 * 60 * 1000;
-    found.retain(|(_, m)| {
-        m.modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64 >= day_ago_ms)
-            .unwrap_or(false)
-    });
+    // Cold-scan: take the 50 newest matching files. Older ones still appear in the watch as
+    // they're modified — we just don't backfill the entire history on first-add. No time-window
+    // filter: a project folder can be weeks old and the user still wants to see its renders.
     found.sort_by_key(|(_, m)| {
         m.modified()
             .ok()

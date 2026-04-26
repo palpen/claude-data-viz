@@ -128,6 +128,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::add_local_watch,
+            commands::rescan_watch,
             commands::remove_watch,
             commands::set_follow_latest,
             commands::set_selected,

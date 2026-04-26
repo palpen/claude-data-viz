@@ -18,6 +18,8 @@ interface State {
   watches: Watch[];
   watchStatus: Record<string, WatchStatus>;
   selectedId: ItemId | null;
+  /// When set, the sidebar filters to items for this watch only. null = show all watches.
+  activeWatchId: string | null;
   followLatest: boolean;
   hydrated: boolean;
 }
@@ -31,6 +33,7 @@ interface Actions {
   evictItem: (e: VizEvicted) => void;
   addWatch: (w: Watch) => void;
   removeWatch: (id: string) => void;
+  setActiveWatchId: (id: string | null) => void;
   setWatchStatus: (id: string, status: WatchStatus) => void;
   select: (id: ItemId | null) => void;
   toggleFollow: () => void;
@@ -50,6 +53,7 @@ export const useVizStore = create<State & Actions>()(
     watches: [],
     watchStatus: {},
     selectedId: null,
+    activeWatchId: null,
     followLatest: true,
     hydrated: false,
 
@@ -146,12 +150,14 @@ export const useVizStore = create<State & Actions>()(
         return {
           watches: s.watches.filter((w) => w.id !== id),
           watchStatus: remainingStatus,
+          activeWatchId: s.activeWatchId === id ? null : s.activeWatchId,
           items: Object.fromEntries(
             Object.entries(s.items).filter(([_, it]) => it.watch_id !== id),
           ),
           order: s.order.filter((k) => !k.startsWith(`${id}::`)),
         };
       }),
+    setActiveWatchId: (id) => set({ activeWatchId: id }),
     setWatchStatus: (id, status) =>
       set((s) => ({ watchStatus: { ...s.watchStatus, [id]: status } })),
 
