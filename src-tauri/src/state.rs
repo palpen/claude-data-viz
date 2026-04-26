@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 pub type ItemKey = (String, String);
 
@@ -26,6 +27,10 @@ pub struct AppState {
     /// Per-key in-flight dedup for SFTP downloads. Shared across all SSH watches: two
     /// concurrent fetches of the same file (e.g., user clicks twice) collapse onto one.
     pub fetch_locks: FetchLocks,
+    /// Global cap on concurrent SFTP fetches across ALL watches. OpenSSH defaults to
+    /// `MaxSessions=10`; the transcript poller already holds one channel, so 4 permits leaves
+    /// headroom for stat/readdir/canonicalize bursts without tripping channel exhaustion.
+    pub fetch_semaphore: Arc<Semaphore>,
     /// Set whenever the items map mutates; consumed by a periodic background task that flushes
     /// viz-history.json. Cheap atomic so callers don't pay disk I/O on the hot path.
     pub history_dirty: AtomicBool,
@@ -53,6 +58,7 @@ impl AppState {
             global_index: transcript::new_index(),
             remote_connections: RemoteConnections::new(),
             fetch_locks: FetchLocks::default(),
+            fetch_semaphore: Arc::new(Semaphore::new(4)),
             history_dirty: AtomicBool::new(false),
             recent_remotes: Mutex::new(Vec::new()),
         })
