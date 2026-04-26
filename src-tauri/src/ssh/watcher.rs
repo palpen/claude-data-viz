@@ -173,7 +173,7 @@ async fn run_loop(
         let sftp = match conn.open_sftp().await {
             Ok(s) => s,
             Err(e) => {
-                set_status(
+                set_status_and_maybe_emit(
                     &app,
                     &status,
                     &watch_id,
@@ -192,7 +192,7 @@ async fn run_loop(
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("No such file") || msg.contains("not found") {
-                    set_status(
+                    set_status_and_maybe_emit(
                         &app,
                         &status,
                         &watch_id,
@@ -200,7 +200,7 @@ async fn run_loop(
                     );
                     return; // Stop polling — config is bad. User must edit watch.
                 }
-                set_status(
+                set_status_and_maybe_emit(
                     &app,
                     &status,
                     &watch_id,
@@ -214,9 +214,10 @@ async fn run_loop(
             }
         };
 
-        // Successful scan ⇒ Connected, reset backoff.
+        // Successful scan ⇒ Connected, reset backoff. Emits proactively if we were
+        // previously Reconnecting — fixes the stale "Reconnecting for Xs" topbar bug.
         backoff.reset();
-        set_status(&app, &status, &watch_id, WatchStatus::Connected);
+        set_status_and_maybe_emit(&app, &status, &watch_id, WatchStatus::Connected);
 
         let any_change = reconcile(
             &app,
@@ -481,38 +482,35 @@ async fn emit_new(
     cap::enforce_item_cap(app, state);
 }
 
-fn set_status(
+/// Update the watch's status mutex and emit `viz:watch_status` IFF the status actually
+/// changed (full structural equality, not variant-level). This is the side-effecting
+/// counterpart to the pure `StatusTransition::diff` helper used in tests.
+///
+/// The proactive emit is what fixes the stale "Reconnecting for Xs" topbar after a
+/// recovery: the moment a scan succeeds, we transition to Connected and the frontend
+/// gets the event without waiting for the next file change.
+fn set_status_and_maybe_emit(
     app: &AppHandle,
     status: &Arc<parking_lot::Mutex<WatchStatus>>,
     watch_id: &str,
     next: WatchStatus,
 ) {
     let mut cur = status.lock();
-    if statuses_equal(&cur, &next) {
+    let to_emit = StatusTransition::diff(&cur, &next);
+    if to_emit.is_none() {
         return;
     }
-    *cur = next.clone();
+    *cur = next;
     drop(cur);
-    let _ = app.emit(
-        "viz:watch_status",
-        WatchStatusEvent {
-            watch_id: watch_id.to_string(),
-            status: next,
-        },
-    );
-}
-
-fn statuses_equal(a: &WatchStatus, b: &WatchStatus) -> bool {
-    use WatchStatus::*;
-    matches!(
-        (a, b),
-        (Connected, Connected)
-            | (Stopped, Stopped)
-            | (Reconnecting { .. }, Reconnecting { .. })
-            | (AuthFailed { .. }, AuthFailed { .. })
-            | (Unreachable { .. }, Unreachable { .. })
-            | (PathInvalid { .. }, PathInvalid { .. })
-    )
+    if let Some(payload) = to_emit {
+        let _ = app.emit(
+            "viz:watch_status",
+            WatchStatusEvent {
+                watch_id: watch_id.to_string(),
+                status: payload,
+            },
+        );
+    }
 }
 
 /// Convenience for tests / external callers — registers an SshWatcher into watch_handles.
