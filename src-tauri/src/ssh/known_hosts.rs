@@ -375,11 +375,10 @@ mod tests {
         let mut mac = Hmac::<Sha1>::new_from_slice(&salt).unwrap();
         mac.update(host.as_bytes());
         let digest = mac.finalize().into_bytes();
-        let salt_b64 = BASE64_MIME.encode(&salt).replace('\n', "").replace('\r', "");
-        let hash_b64 = BASE64_MIME
-            .encode(&digest)
-            .replace('\n', "")
-            .replace('\r', "");
+        let salt_b64 = BASE64_MIME
+            .encode(&salt)
+            .replace(['\n', '\r'], "");
+        let hash_b64 = BASE64_MIME.encode(&digest).replace(['\n', '\r'], "");
         let line = format!(
             "|1|{}|{} ssh-ed25519 {}\n",
             salt_b64, hash_b64, KEY_A_B64
