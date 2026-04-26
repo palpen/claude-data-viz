@@ -30,11 +30,8 @@ use tokio::task::JoinHandle;
 const POLL_ACTIVE_MS: u64 = 2000;
 const POLL_IDLE_MS: u64 = 10_000;
 const RECURSION_DEPTH: usize = 4;
-#[allow(dead_code)]
 const BACKOFF_INITIAL_MS: u64 = 2_000;
-#[allow(dead_code)]
 const BACKOFF_MAX_MS: u64 = 300_000; // 5 min
-#[allow(dead_code)]
 const BACKOFF_JITTER: f64 = 0.2; // ±20%
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -161,18 +158,17 @@ async fn run_loop(
 ) {
     let mut tracked: HashMap<String, FileTrack> = HashMap::new();
     let mut idle_streak: u32 = 0;
+    let mut backoff = BackoffState::new(
+        BACKOFF_INITIAL_MS,
+        BACKOFF_MAX_MS,
+        BACKOFF_JITTER,
+        seed_from_watch_id(&watch_id),
+    );
 
     loop {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-
-        let interval_ms = if idle_streak >= 5 {
-            POLL_IDLE_MS
-        } else {
-            POLL_ACTIVE_MS
-        };
-        tokio::time::sleep(Duration::from_millis(interval_ms)).await;
 
         let sftp = match conn.open_sftp().await {
             Ok(s) => s,
@@ -186,6 +182,7 @@ async fn run_loop(
                         last_error: Some(e.to_string()),
                     },
                 );
+                tokio::time::sleep(backoff.next_delay()).await;
                 continue;
             }
         };
@@ -212,11 +209,13 @@ async fn run_loop(
                         last_error: Some(msg),
                     },
                 );
+                tokio::time::sleep(backoff.next_delay()).await;
                 continue;
             }
         };
 
-        // Successful scan ⇒ Connected.
+        // Successful scan ⇒ Connected, reset backoff.
+        backoff.reset();
         set_status(&app, &status, &watch_id, WatchStatus::Connected);
 
         let any_change = reconcile(
@@ -234,6 +233,13 @@ async fn run_loop(
         } else {
             idle_streak = idle_streak.saturating_add(1);
         }
+
+        let interval_ms = if idle_streak >= 5 {
+            POLL_IDLE_MS
+        } else {
+            POLL_ACTIVE_MS
+        };
+        tokio::time::sleep(Duration::from_millis(interval_ms)).await;
     }
 }
 
@@ -588,7 +594,6 @@ impl StatusTransition {
 
 /// Derive a deterministic LCG seed from a watch_id so two watchers picking concurrent
 /// jitter samples don't synchronize their reconnect storms.
-#[allow(dead_code)]
 pub(crate) fn seed_from_watch_id(watch_id: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
