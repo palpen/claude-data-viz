@@ -1,8 +1,14 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Check, Loader2, Server, X, KeyRound, ChevronDown } from "lucide-react";
+import { AlertTriangle, Check, Clock, Loader2, Server, X, KeyRound, ChevronDown } from "lucide-react";
 import { tauri } from "../lib/tauri";
 import { useVizStore } from "../store/vizStore";
-import type { SshAgentProbe, SshHostEntry, TestResult, TestStage } from "../types";
+import type {
+  RecentRemote,
+  SshAgentProbe,
+  SshHostEntry,
+  TestResult,
+  TestStage,
+} from "../types";
 
 const DEFAULT_GLOB = "**/*.{png,jpg,jpeg,webp,gif,svg,html,pdf,csv}";
 
@@ -15,6 +21,7 @@ export function ConnectRemoteDialog({ onClose }: Props) {
 
   const [agent, setAgent] = useState<SshAgentProbe | null>(null);
   const [hosts, setHosts] = useState<SshHostEntry[]>([]);
+  const [recents, setRecents] = useState<RecentRemote[]>([]);
   const [selectedAlias, setSelectedAlias] = useState<string>("");
   const [host, setHost] = useState("");
   const [user, setUser] = useState("");
@@ -32,7 +39,35 @@ export function ConnectRemoteDialog({ onClose }: Props) {
       setAgent({ available: false, key_count: 0, error: "probe failed" }),
     );
     tauri.listSshHosts().then(setHosts).catch(() => setHosts([]));
+    tauri.listRecentRemotes().then(setRecents).catch(() => setRecents([]));
   }, []);
+
+  const onPickRecent = (r: RecentRemote) => {
+    setSelectedAlias("");
+    setHost(r.host);
+    setUser(r.user);
+    setPort(String(r.port));
+    setRemotePath(r.remote_path);
+    setGlob(r.glob);
+    setTestResult(null);
+    setTopErr(null);
+  };
+
+  const onForgetRecent = async (r: RecentRemote, e: React.MouseEvent) => {
+    e.stopPropagation();
+    await tauri.forgetRecentRemote(r.host, r.user, r.port, r.remote_path).catch(() => {});
+    setRecents((prev) =>
+      prev.filter(
+        (x) =>
+          !(
+            x.host === r.host &&
+            x.user === r.user &&
+            x.port === r.port &&
+            x.remote_path === r.remote_path
+          ),
+      ),
+    );
+  };
 
   const onPickAlias = (alias: string) => {
     setSelectedAlias(alias);
@@ -55,7 +90,7 @@ export function ConnectRemoteDialog({ onClose }: Props) {
         host: selectedAlias || host,
         user: user.trim() || null,
         port: portNum && !isNaN(portNum) ? portNum : null,
-        remote_path: remotePath,
+        remote_path: remotePath.trim() || null,
         glob,
       });
       setTestResult(r);
@@ -75,7 +110,7 @@ export function ConnectRemoteDialog({ onClose }: Props) {
         host: selectedAlias || host,
         user: user.trim() || null,
         port: portNum && !isNaN(portNum) ? portNum : null,
-        remote_path: remotePath,
+        remote_path: remotePath.trim() || null,
         glob,
       });
       addWatch(watch);
@@ -87,9 +122,9 @@ export function ConnectRemoteDialog({ onClose }: Props) {
     }
   };
 
-  const canTest = !!(host || selectedAlias) && !!remotePath && !!glob && !testing;
+  const canTest = !!(host || selectedAlias) && !!glob && !testing;
   const canConnect =
-    !!(host || selectedAlias) && !!remotePath && !!glob && !busy && (agent?.available ?? false);
+    !!(host || selectedAlias) && !!glob && !busy && (agent?.available ?? false);
 
   return (
     <div
@@ -118,6 +153,14 @@ export function ConnectRemoteDialog({ onClose }: Props) {
 
         <div className="px-5 py-4 space-y-4">
           <AgentBanner probe={agent} />
+
+          {recents.length > 0 && (
+            <RecentList
+              recents={recents}
+              onPick={onPickRecent}
+              onForget={onForgetRecent}
+            />
+          )}
 
           {hosts.length > 0 && (
             <Field label="From ~/.ssh/config" hint="Picks defaults; override below if needed.">
@@ -156,11 +199,14 @@ export function ConnectRemoteDialog({ onClose }: Props) {
             </Field>
           </div>
 
-          <Field label="Remote path" hint="Required. The directory to watch on the remote.">
+          <Field
+            label="Remote path"
+            hint="Optional. Defaults to the home directory — change folder after connecting."
+          >
             <Input
               value={remotePath}
               onChange={setRemotePath}
-              placeholder="/home/user/renders"
+              placeholder="(home directory)"
             />
           </Field>
 
@@ -274,6 +320,60 @@ function StageBadge({ label, stage }: { label: string; stage: TestStage }) {
       {icon}
       {label}
     </span>
+  );
+}
+
+function RecentList({
+  recents,
+  onPick,
+  onForget,
+}: {
+  recents: RecentRemote[];
+  onPick: (r: RecentRemote) => void;
+  onForget: (r: RecentRemote, e: React.MouseEvent) => void;
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <Clock className="w-3 h-3 text-[color:var(--color-text-dim)]" />
+        <span className="text-[11px] uppercase tracking-wider text-[color:var(--color-text-dim)]">
+          Recent
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {recents.map((r) => {
+          const k = `${r.host}|${r.user}|${r.port}|${r.remote_path}`;
+          return (
+            <button
+              key={k}
+              type="button"
+              onClick={() => onPick(r)}
+              title={`${r.user}@${r.host}:${r.port} ${r.remote_path}`}
+              className="group flex items-center gap-1.5 max-w-[280px] px-2 py-1 rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] hover:border-[color:var(--color-accent)]/60 hover:bg-[color:var(--color-surface-2)] text-[11px] text-left"
+            >
+              <span className="font-mono truncate">
+                <span className="opacity-70">{r.user}@</span>
+                {r.host}
+                <span className="opacity-50">:{r.remote_path}</span>
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={(e) => onForget(r, e)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") onForget(r, e as unknown as React.MouseEvent);
+                }}
+                title="Forget this connection"
+                aria-label="Forget this connection"
+                className="opacity-40 hover:opacity-100 hover:text-red-300 cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

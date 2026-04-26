@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, RefreshCw, Server, Sparkles, Trash2, X, AlertTriangle } from "lucide-react";
+import {
+  FolderOpen,
+  RefreshCw,
+  Server,
+  Sparkles,
+  Trash2,
+  X,
+  AlertTriangle,
+} from "lucide-react";
 import { useVizStore } from "../store/vizStore";
 import { FollowToggle } from "./FollowToggle";
 import { ConnectRemoteDialog } from "./ConnectRemoteDialog";

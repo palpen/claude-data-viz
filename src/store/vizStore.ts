@@ -33,6 +33,7 @@ interface Actions {
   evictItem: (e: VizEvicted) => void;
   addWatch: (w: Watch) => void;
   removeWatch: (id: string) => void;
+  replaceWatch: (w: Watch) => void;
   setActiveWatchId: (id: string | null) => void;
   setWatchStatus: (id: string, status: WatchStatus) => void;
   select: (id: ItemId | null) => void;
@@ -144,6 +145,23 @@ export const useVizStore = create<State & Actions>()(
     },
 
     addWatch: (w) => set((s) => ({ watches: [...s.watches, w] })),
+    replaceWatch: (w) =>
+      // A path change invalidates everything tied to the old folder. The backend has already
+      // cleared its in-memory map and the new poller will re-emit viz:new for files in the new
+      // path on its first scan; we just hard-drop the old entries here so the sidebar updates
+      // immediately rather than waiting for the (status="deleted") viz:gone events.
+      set((s) => {
+        const filteredItems = Object.fromEntries(
+          Object.entries(s.items).filter(([_, it]) => it.watch_id !== w.id),
+        );
+        return {
+          watches: s.watches.map((existing) => (existing.id === w.id ? w : existing)),
+          items: filteredItems,
+          order: s.order.filter((k) => !k.startsWith(`${w.id}::`)),
+          selectedId:
+            s.selectedId && s.selectedId.startsWith(`${w.id}::`) ? null : s.selectedId,
+        };
+      }),
     removeWatch: (id) =>
       set((s) => {
         const { [id]: _dropped, ...remainingStatus } = s.watchStatus;

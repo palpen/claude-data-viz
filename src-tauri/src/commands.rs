@@ -3,16 +3,18 @@ use crate::persistence;
 use crate::ssh::{self, cache, config as ssh_config, connection, registry::RemoteKey, watcher as ssh_watcher};
 use crate::state::{mark_history_dirty, AppState, WatchHandle};
 use crate::types::{
-    InitialState, SshAgentProbe, SshHostEntry, TestResult, TestStage, VizItem, Watch, WatchSource,
-    WatchStatus,
+    InitialState, RecentRemote, RemoteDirListing, SshAgentProbe, SshHostEntry, TestResult,
+    TestStage, VizGone, VizItem, Watch, WatchSource, WatchStatus,
 };
+use chrono::Utc;
 use globset::Glob;
 use russh_keys::agent::client::AgentClient;
+use russh_sftp::client::SftpSession;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 #[tauri::command]
@@ -162,8 +164,27 @@ pub struct TestSshArgs {
     pub host: String,
     pub user: Option<String>,
     pub port: Option<u16>,
-    pub remote_path: String,
+    /// Empty / missing → resolve to the SFTP cwd (the user's home dir on the remote).
+    #[serde(default)]
+    pub remote_path: Option<String>,
     pub glob: String,
+}
+
+/// Resolve an optional remote path to a concrete absolute one. If the user left it blank, we
+/// canonicalize "." which the SFTP server roots at the authenticated user's home dir. This is
+/// what `sftp host` lands you in interactively, so it matches mental model.
+async fn resolve_remote_path(
+    sftp: &SftpSession,
+    requested: &Option<String>,
+) -> Result<String, String> {
+    let trimmed = requested.as_deref().map(str::trim).unwrap_or("");
+    if trimmed.is_empty() {
+        sftp.canonicalize(".")
+            .await
+            .map_err(|e| format!("resolve home dir: {e}"))
+    } else {
+        Ok(trimmed.to_string())
+    }
 }
 
 fn ok_stage() -> TestStage {
@@ -262,7 +283,18 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
             };
         }
     };
-    if let Err(e) = sftp.metadata(&args.remote_path).await {
+    let resolved_path = match resolve_remote_path(&sftp, &args.remote_path).await {
+        Ok(p) => p,
+        Err(e) => {
+            return TestResult {
+                reachable,
+                authenticated,
+                path_exists: err_stage(e),
+                matched: skip_stage(),
+            };
+        }
+    };
+    if let Err(e) = sftp.metadata(&resolved_path).await {
         return TestResult {
             reachable,
             authenticated,
@@ -278,7 +310,7 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
         Err(e) => err_stage(format!("invalid glob: {e}")),
         Ok(g) => {
             let matcher = g.compile_matcher();
-            match sftp.read_dir(&args.remote_path).await {
+            match sftp.read_dir(&resolved_path).await {
                 Ok(entries) => {
                     let count = entries
                         .into_iter()
@@ -311,7 +343,9 @@ pub struct AddRemoteWatchArgs {
     pub host: String,
     pub user: Option<String>,
     pub port: Option<u16>,
-    pub remote_path: String,
+    /// Empty / missing → resolve to the user's home dir on the remote.
+    #[serde(default)]
+    pub remote_path: Option<String>,
     pub glob: String,
 }
 
@@ -341,6 +375,21 @@ pub async fn add_remote_watch(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Resolve home-dir default before storing — Watch is the source of truth, and we don't
+    // want it carrying empty/relative paths through reconnects or restarts.
+    let resolved_path = {
+        let sftp = conn.open_sftp().await.map_err(|e| {
+            state.remote_connections.release(&key);
+            format!("sftp open: {e}")
+        })?;
+        let p = resolve_remote_path(&sftp, &args.remote_path).await.map_err(|e| {
+            state.remote_connections.release(&key);
+            e
+        })?;
+        drop(sftp);
+        p
+    };
+
     let watch_id = Uuid::new_v4().to_string();
     let watcher = ssh_watcher::start(
         app.clone(),
@@ -348,7 +397,7 @@ pub async fn add_remote_watch(
         conn,
         key.clone(),
         watch_id.clone(),
-        args.remote_path.clone(),
+        resolved_path.clone(),
         args.glob.clone(),
     )
     .map_err(|e| {
@@ -361,9 +410,9 @@ pub async fn add_remote_watch(
         id: watch_id.clone(),
         source: WatchSource::Ssh {
             host: args.host.clone(),
-            user,
+            user: user.clone(),
             port,
-            remote_path: args.remote_path.clone(),
+            remote_path: resolved_path.clone(),
             glob: args.glob.clone(),
         },
         session_path: None,
@@ -377,8 +426,40 @@ pub async fn add_remote_watch(
             watcher: Box::new(watcher),
         },
     );
+
+    persistence::record_recent_remote(
+        state.inner(),
+        RecentRemote {
+            host: args.host.clone(),
+            user,
+            port,
+            remote_path: resolved_path,
+            glob: args.glob.clone(),
+            last_used_ms: Utc::now().timestamp_millis(),
+        },
+    );
     persistence::save_prefs(&app, state.inner());
     Ok(watch)
+}
+
+#[tauri::command]
+pub fn list_recent_remotes(state: State<Arc<AppState>>) -> Vec<RecentRemote> {
+    state.recent_remotes.lock().clone()
+}
+
+#[tauri::command]
+pub fn forget_recent_remote(
+    app: AppHandle,
+    state: State<Arc<AppState>>,
+    host: String,
+    user: String,
+    port: u16,
+    remote_path: String,
+) {
+    state.recent_remotes.lock().retain(|r| {
+        !(r.host == host && r.user == user && r.port == port && r.remote_path == remote_path)
+    });
+    persistence::save_prefs(&app, state.inner());
 }
 
 #[tauri::command]
@@ -524,6 +605,248 @@ pub async fn reconnect_watch(
         },
     );
     Ok(())
+}
+
+/// Retarget an existing SSH watch at a new directory. Reuses the live RemoteConnection (no
+/// re-auth), validates the new path, swaps the poller, and clears stale items + emits viz:gone
+/// for the frontend so the sidebar doesn't show entries from the old folder.
+#[tauri::command]
+pub async fn update_remote_watch_path(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    watch_id: String,
+    new_path: Option<String>,
+) -> Result<Watch, String> {
+    let source = state
+        .watches
+        .lock()
+        .iter()
+        .find(|w| w.id == watch_id)
+        .map(|w| w.source.clone())
+        .ok_or_else(|| format!("watch {watch_id} not found"))?;
+    let WatchSource::Ssh {
+        host,
+        user,
+        port,
+        remote_path: _,
+        glob,
+    } = source
+    else {
+        return Err("watch is not an SSH source".into());
+    };
+
+    let resolved_cfg = ssh_config::resolve(&host);
+    let key = RemoteKey::new(resolved_cfg.host_name.clone(), user.clone(), port);
+
+    // Bump the refcount BEFORE dropping the old watcher. This keeps the SSH session alive
+    // even if this is the only watch on this host — otherwise we'd tear it down only to
+    // re-auth a moment later.
+    let mut resolved_for_connect = resolved_cfg.clone();
+    resolved_for_connect.port = port;
+    let conn = state
+        .remote_connections
+        .acquire(&key, resolved_for_connect, &app, state.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Validate the new path. Empty → home dir.
+    let resolved_path = {
+        let sftp = conn.open_sftp().await.map_err(|e| {
+            state.remote_connections.release(&key);
+            format!("sftp open: {e}")
+        })?;
+        let p = match resolve_remote_path(&sftp, &new_path).await {
+            Ok(p) => p,
+            Err(e) => {
+                state.remote_connections.release(&key);
+                return Err(e);
+            }
+        };
+        if let Err(e) = sftp.metadata(&p).await {
+            state.remote_connections.release(&key);
+            return Err(format!("path stat: {e}"));
+        }
+        p
+    };
+
+    // Drop the existing watcher (releases the old refcount; ours from acquire above remains).
+    state.watch_handles.lock().remove(&watch_id);
+
+    // Clear items for this watch_id and notify the frontend so the sidebar updates immediately.
+    let stale_paths: Vec<String> = {
+        let mut items = state.items.lock();
+        let stale: Vec<String> = items
+            .keys()
+            .filter(|(wid, _)| wid == &watch_id)
+            .map(|(_, p)| p.clone())
+            .collect();
+        for p in &stale {
+            items.remove(&(watch_id.clone(), p.clone()));
+        }
+        stale
+    };
+    if !stale_paths.is_empty() {
+        mark_history_dirty(state.inner());
+        for p in stale_paths {
+            let _ = app.emit(
+                "viz:gone",
+                VizGone {
+                    watch_id: watch_id.clone(),
+                    abs_path: p,
+                },
+            );
+        }
+    }
+
+    let watcher = ssh_watcher::start(
+        app.clone(),
+        state.inner().clone(),
+        conn,
+        key.clone(),
+        watch_id.clone(),
+        resolved_path.clone(),
+        glob.clone(),
+    )
+    .map_err(|e| {
+        state.remote_connections.release(&key);
+        e.to_string()
+    })?;
+
+    state.watch_handles.lock().insert(
+        watch_id.clone(),
+        WatchHandle {
+            id: watch_id.clone(),
+            watcher: Box::new(watcher),
+        },
+    );
+
+    // Update the persisted Watch source.
+    let updated = {
+        let mut watches = state.watches.lock();
+        let entry = watches
+            .iter_mut()
+            .find(|w| w.id == watch_id)
+            .ok_or_else(|| format!("watch {watch_id} vanished"))?;
+        entry.source = WatchSource::Ssh {
+            host: host.clone(),
+            user: user.clone(),
+            port,
+            remote_path: resolved_path.clone(),
+            glob: glob.clone(),
+        };
+        entry.clone()
+    };
+
+    persistence::record_recent_remote(
+        state.inner(),
+        RecentRemote {
+            host,
+            user,
+            port,
+            remote_path: resolved_path,
+            glob,
+            last_used_ms: Utc::now().timestamp_millis(),
+        },
+    );
+    persistence::save_prefs(&app, state.inner());
+    Ok(updated)
+}
+
+/// List subdirectories at `path` on the remote so the frontend can render a folder browser
+/// when the user is picking which directory to watch. `path` is None / empty → SFTP home dir.
+/// Skips well-known noise dirs (node_modules, .git, target, etc.) — same list the watcher uses.
+#[tauri::command]
+pub async fn list_remote_dirs(
+    state: State<'_, Arc<AppState>>,
+    watch_id: String,
+    path: Option<String>,
+) -> Result<RemoteDirListing, String> {
+    let source = state
+        .watches
+        .lock()
+        .iter()
+        .find(|w| w.id == watch_id)
+        .map(|w| w.source.clone())
+        .ok_or_else(|| format!("watch {watch_id} not found"))?;
+    let (host, user, port) = match &source {
+        WatchSource::Ssh {
+            host, user, port, ..
+        } => (host.clone(), user.clone(), *port),
+        WatchSource::Local { .. } => {
+            return Err("watch is local — use the OS folder picker instead".into())
+        }
+    };
+    let resolved_cfg = ssh_config::resolve(&host);
+    let key = RemoteKey::new(resolved_cfg.host_name.clone(), user, port);
+    let conn = state
+        .remote_connections
+        .get(&key)
+        .ok_or_else(|| "remote connection is not active".to_string())?;
+    let sftp = conn.open_sftp().await.map_err(|e| e.to_string())?;
+    let resolved_path = resolve_remote_path(&sftp, &path).await?;
+    // Canonicalize to remove "..", trailing slashes etc. so navigation feels stable.
+    let canonical = sftp
+        .canonicalize(&resolved_path)
+        .await
+        .map_err(|e| format!("canonicalize: {e}"))?;
+    let entries = sftp
+        .read_dir(&canonical)
+        .await
+        .map_err(|e| format!("read_dir: {e}"))?;
+    let skip = [
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "target",
+        "dist",
+        "build",
+        "out",
+        ".next",
+        ".nuxt",
+        ".svelte-kit",
+        ".turbo",
+        ".cache",
+        ".parcel-cache",
+        "coverage",
+    ];
+    let mut dirs: Vec<String> = entries
+        .into_iter()
+        .filter_map(|e| {
+            if !e.metadata().is_dir() {
+                return None;
+            }
+            let name = e.file_name();
+            if name.is_empty() || name == "." || name == ".." {
+                return None;
+            }
+            if skip.iter().any(|s| *s == name) {
+                return None;
+            }
+            Some(name)
+        })
+        .collect();
+    dirs.sort();
+
+    let parent = parent_path(&canonical);
+    Ok(RemoteDirListing {
+        current: canonical,
+        parent,
+        dirs,
+    })
+}
+
+fn parent_path(p: &str) -> Option<String> {
+    if p == "/" || p.is_empty() {
+        return None;
+    }
+    let trimmed = p.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) => Some("/".to_string()),
+        Some(i) => Some(trimmed[..i].to_string()),
+        None => None,
+    }
 }
 
 #[allow(unused_imports)]
