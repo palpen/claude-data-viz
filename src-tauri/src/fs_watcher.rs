@@ -362,3 +362,31 @@ fn is_skippable_dir(path: &Path) -> bool {
         )
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn build_item_returns_none_for_unknown_extension() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("notes.txt");
+        fs::write(&path, b"hello").expect("write txt");
+        let meta = fs::metadata(&path).expect("metadata");
+        assert!(build_item("watch-1", dir.path(), &path, &meta).is_none());
+    }
+
+    #[test]
+    fn build_item_returns_some_for_png() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("plot.png");
+        fs::write(&path, b"\x89PNG\r\n").expect("write png");
+        let meta = fs::metadata(&path).expect("metadata");
+        let item = build_item("watch-1", dir.path(), &path, &meta).expect("some item");
+        assert_eq!(item.kind, VizKind::Png);
+        assert_eq!(item.watch_id, "watch-1");
+        assert_eq!(item.rel_path, "plot.png");
+    }
+}
