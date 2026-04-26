@@ -39,6 +39,12 @@ russh-sftp = "2.0"
 async-trait = "0.1"
 ssh2-config = "0.5"
 filetime = "0.2"
+hmac = "0.12"
+sha1 = "0.10"
+data-encoding = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
