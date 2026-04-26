@@ -826,6 +826,83 @@ mod tests {
     }
 
     #[test]
+    fn tool_mentions_path_basename_substring_does_not_match() {
+        // `myout.png` should not match `out.png` (left side is alphanumeric).
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cp myout.png /backup/"}), None);
+        assert!(!tool_mentions_path(&t, "/work/out.png"));
+        // `out.png.bak` should not match `out.png` (right side is `.`, part of body).
+        let t = mk_tool("Bash", 0, "x", json!({"command": "rm out.png.bak"}), None);
+        assert!(!tool_mentions_path(&t, "/work/out.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_substring_in_result_output_does_not_match() {
+        let mut t = mk_tool("Bash", 0, "x", json!({"command": "python plot.py"}), None);
+        t.result_output = Some("found myout.png and out.png.bak".into());
+        assert!(!tool_mentions_path(&t, "/work/out.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_inside_path_segment_does_not_match() {
+        // `/data/a.csv.gz` should not match `/work/a.csv`.
+        let t = mk_tool("Bash", 0, "x", json!({"command": "gunzip /data/a.csv.gz"}), None);
+        assert!(!tool_mentions_path(&t, "/work/a.csv"));
+    }
+
+    #[test]
+    fn tool_mentions_path_matplotlib_stdout_basename_still_matches() {
+        // Regression guard: classic matplotlib stdout still matches via basename.
+        let mut t = mk_tool("Bash", 0, "x", json!({"command": "python plot.py"}), None);
+        t.result_output = Some("Saved figure to plot.png".into());
+        assert!(tool_mentions_path(&t, "/cwd/plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_at_string_start_matches() {
+        let t = mk_tool("Bash", 0, "x", json!({"command": "plot.png"}), None);
+        assert!(tool_mentions_path(&t, "/cwd/plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_at_string_end_matches() {
+        let mut t = mk_tool("Bash", 0, "x", json!({"command": "python plot.py"}), None);
+        t.result_output = Some("Wrote plot.png".into());
+        assert!(tool_mentions_path(&t, "/cwd/plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_quoted_matches() {
+        let t = mk_tool("Bash", 0, "x", json!({"command": "open \"plot.png\""}), None);
+        assert!(tool_mentions_path(&t, "/cwd/plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_dotfile_basename() {
+        // `.env` should match a real `.env` reference.
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cat .env"}), None);
+        assert!(tool_mentions_path(&t, "/proj/.env"));
+        // But `my.env` should not match `.env` (left side is alphanumeric).
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cat my.env"}), None);
+        assert!(!tool_mentions_path(&t, "/proj/.env"));
+    }
+
+    #[test]
+    fn tool_mentions_path_basename_with_space() {
+        let t = mk_tool("Bash", 0, "x", json!({"command": "open \"my plot.png\""}), None);
+        assert!(tool_mentions_path(&t, "/cwd/my plot.png"));
+    }
+
+    #[test]
+    fn tool_mentions_path_unicode_basename() {
+        // Non-ASCII basename should still match when word-bounded.
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cat sín.png"}), None);
+        assert!(tool_mentions_path(&t, "/cwd/sín.png"));
+        // But `sín.png.bak` should not match `sín.png`.
+        let t = mk_tool("Bash", 0, "x", json!({"command": "cat sín.png.bak"}), None);
+        assert!(!tool_mentions_path(&t, "/cwd/sín.png"));
+    }
+
+    #[test]
     fn lookup_prefers_tool_match_with_prompt() {
         let mut idx = TranscriptIndex::default();
         idx.last_user_prompt = Some(UserPromptEntry {
