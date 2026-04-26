@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Viewer } from "./components/Viewer";
 import { TopBar } from "./components/TopBar";
 import { FirstRunPicker } from "./components/FirstRunPicker";
+import { prefetchRemoteFile, invalidateRemoteAsset } from "./components/RemoteAssetGate";
 import { useHotkeys } from "./lib/hotkeys";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
@@ -17,6 +18,7 @@ export default function App() {
   const enrichItem = useVizStore((s) => s.enrichItem);
   const removeItem = useVizStore((s) => s.removeItem);
   const evictItem = useVizStore((s) => s.evictItem);
+  const setWatchStatus = useVizStore((s) => s.setWatchStatus);
   const jumpTo = useVizStore((s) => s.jumpTo);
   const toggleFollow = useVizStore((s) => s.toggleFollow);
 
@@ -31,17 +33,46 @@ export default function App() {
         followLatest: initial.follow_latest,
       });
       unlistens = await Promise.all([
-        events.onVizNew(addItem),
-        events.onVizUpdated(updateItem),
+        events.onVizNew((item) => {
+          addItem(item);
+          maybePrefetch(item.watch_id, item.abs_path);
+        }),
+        events.onVizUpdated((u) => {
+          updateItem(u);
+          // Remote file changed: drop cached copy so next render re-fetches.
+          invalidateRemoteAsset(u.watch_id, u.abs_path);
+          maybePrefetch(u.watch_id, u.abs_path);
+        }),
         events.onVizEnriched(enrichItem),
-        events.onVizGone(removeItem),
+        events.onVizGone((g) => {
+          removeItem(g);
+          invalidateRemoteAsset(g.watch_id, g.abs_path);
+        }),
         events.onVizEvicted(evictItem),
+        events.onWatchStatus((e) => setWatchStatus(e.watch_id, e.status)),
       ]);
     })();
     return () => {
       for (const u of unlistens) u();
     };
-  }, [hydrate, addItem, updateItem, enrichItem, removeItem, evictItem]);
+  }, [
+    hydrate,
+    addItem,
+    updateItem,
+    enrichItem,
+    removeItem,
+    evictItem,
+    setWatchStatus,
+  ]);
+
+  function maybePrefetch(watchId: string, absPath: string) {
+    const s = useVizStore.getState();
+    if (!s.followLatest) return;
+    const watch = s.watches.find((w) => w.id === watchId);
+    if (watch?.source.kind === "ssh") {
+      prefetchRemoteFile(watchId, absPath);
+    }
+  }
 
   useHotkeys({
     onJumpTo: jumpTo,

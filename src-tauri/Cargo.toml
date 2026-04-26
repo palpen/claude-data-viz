@@ -34,7 +34,11 @@ parking_lot = "0.12"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
 russh = "0.49"
+russh-keys = "0.49"
 russh-sftp = "2.0"
+async-trait = "0.1"
+ssh2-config = "0.5"
+filetime = "0.2"
 
 [profile.release]
 panic = "abort"

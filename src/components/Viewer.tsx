@@ -1,14 +1,20 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useVizStore } from "../store/vizStore";
 import { EmptyState } from "./EmptyState";
+import { RemoteAssetGate } from "./RemoteAssetGate";
 import { pickViewer } from "../viewers";
 import { formatDistanceToNow } from "date-fns";
 import { Check, Copy, MessageSquare } from "lucide-react";
-import type { VizItem } from "../types";
+import type { VizItem, Watch } from "../types";
 
 export function Viewer() {
   const selectedId = useVizStore((s) => s.selectedId);
   const item = useVizStore((s) => (selectedId ? s.items[selectedId] : null));
+  const watches = useVizStore((s) => s.watches);
+  const watch = useMemo<Watch | null>(
+    () => (item ? watches.find((w) => w.id === item.watch_id) ?? null : null),
+    [item, watches],
+  );
 
   if (!item) {
     return (
@@ -41,17 +47,24 @@ export function Viewer() {
         </div>
         <MoreInfo item={item} />
       </div>
-      <div className="flex-1 min-h-0 overflow-hidden">{renderBody(item)}</div>
+      <div className="flex-1 min-h-0 overflow-hidden">{renderBody(item, watch)}</div>
     </div>
   );
 }
 
-function renderBody(item: VizItem) {
+function renderBody(item: VizItem, watch: Watch | null) {
   const def = pickViewer(item.kind);
   if (!def) {
     return <EmptyState message={`Unsupported file type: ${item.kind}`} />;
   }
-  return <def.Component item={item} />;
+  if (watch && watch.source.kind === "ssh") {
+    return (
+      <RemoteAssetGate watchId={item.watch_id} absPath={item.abs_path} version={item.mtime}>
+        {(localPath) => <def.Component item={item} displayPath={localPath} />}
+      </RemoteAssetGate>
+    );
+  }
+  return <def.Component item={item} displayPath={item.abs_path} />;
 }
 
 function formatBytes(n: number): string {

@@ -3,10 +3,12 @@ import { useState } from "react";
 import { FolderOpen, Server, Sparkles } from "lucide-react";
 import { tauri } from "../lib/tauri";
 import { useVizStore } from "../store/vizStore";
+import { ConnectRemoteDialog } from "./ConnectRemoteDialog";
 
 export function FirstRunPicker() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [showRemote, setShowRemote] = useState(false);
   const addWatch = useVizStore((s) => s.addWatch);
 
   const pickLocal = async () => {
@@ -55,18 +57,13 @@ export function FirstRunPicker() {
             </div>
           </button>
           <button
-            disabled
-            title="Coming soon"
-            className="flex items-start gap-3 p-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] opacity-50 cursor-not-allowed text-left"
+            onClick={() => setShowRemote(true)}
+            disabled={busy}
+            className="flex items-start gap-3 p-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] hover:border-[color:var(--color-accent)]/60 hover:bg-[color:var(--color-surface-2)] transition-colors text-left disabled:opacity-50"
           >
-            <Server className="w-5 h-5 mt-0.5 text-[color:var(--color-text-dim)]" />
+            <Server className="w-5 h-5 mt-0.5 text-[color:var(--color-accent)]" />
             <div>
-              <div className="font-medium flex items-center gap-2">
-                Connect to a remote server
-                <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-[color:var(--color-surface-2)] border border-[color:var(--color-border)]">
-                  Coming soon
-                </span>
-              </div>
+              <div className="font-medium">Connect to a remote server</div>
               <div className="text-xs text-[color:var(--color-text-dim)] mt-0.5">
                 Stream plots from any SSH host without copying files locally.
               </div>
@@ -75,6 +72,7 @@ export function FirstRunPicker() {
         </div>
         {err && <div className="mt-4 text-sm text-red-300">{err}</div>}
       </div>
+      {showRemote && <ConnectRemoteDialog onClose={() => setShowRemote(false)} />}
     </div>
   );
 }

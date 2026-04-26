@@ -108,6 +108,73 @@ pub enum WatchSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub enum WatchStatus {
+    Connected,
+    Reconnecting {
+        #[ts(type = "number")]
+        since_ms: i64,
+        last_error: Option<String>,
+    },
+    AuthFailed {
+        last_error: String,
+    },
+    Unreachable {
+        #[ts(type = "number")]
+        since_ms: i64,
+        last_error: String,
+    },
+    PathInvalid {
+        last_error: String,
+    },
+    Stopped,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub struct WatchStatusEvent {
+    pub watch_id: String,
+    pub status: WatchStatus,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub struct SshHostEntry {
+    pub alias: String,
+    pub host_name: String,
+    pub user: Option<String>,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub struct SshAgentProbe {
+    pub available: bool,
+    #[ts(type = "number")]
+    pub key_count: u32,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub struct TestStage {
+    pub ok: bool,
+    pub error: Option<String>,
+    #[ts(type = "number | null")]
+    pub matched_files: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub struct TestResult {
+    pub reachable: TestStage,
+    pub authenticated: TestStage,
+    pub path_exists: TestStage,
+    pub matched: TestStage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../src/types/bindings/")]
 pub struct Watch {
     pub id: String,

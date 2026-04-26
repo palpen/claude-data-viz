@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { Sheet } from "lucide-react";
 import { convertFileSrc } from "../lib/tauri";
-import type { VizItem } from "../types";
-import type { ViewerDefinition } from "./registry";
+import type { ViewerDefinition, ViewerProps } from "./registry";
 import { DataTable } from "./data/DataTable";
 import type { Column, Dataset } from "./data/types";
 
@@ -23,8 +22,9 @@ type LoadState =
   | { status: "error"; message: string }
   | { status: "ready"; dataset: Dataset };
 
-function CsvView({ item }: { item: VizItem }) {
-  const { abs_path: absPath, size, mtime } = item;
+function CsvView({ item, displayPath }: ViewerProps) {
+  const { size, mtime } = item;
+  const absPath = displayPath;
   const [state, setState] = useState<LoadState>({ status: "fetching" });
 
   useEffect(() => {

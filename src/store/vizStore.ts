@@ -9,12 +9,14 @@ import {
   type VizItem,
   type VizUpdated,
   type Watch,
+  type WatchStatus,
 } from "../types";
 
 interface State {
   items: Record<ItemId, VizItem>;
   order: ItemId[];
   watches: Watch[];
+  watchStatus: Record<string, WatchStatus>;
   selectedId: ItemId | null;
   followLatest: boolean;
   hydrated: boolean;
@@ -29,6 +31,7 @@ interface Actions {
   evictItem: (e: VizEvicted) => void;
   addWatch: (w: Watch) => void;
   removeWatch: (id: string) => void;
+  setWatchStatus: (id: string, status: WatchStatus) => void;
   select: (id: ItemId | null) => void;
   toggleFollow: () => void;
   setFollow: (value: boolean) => void;
@@ -45,6 +48,7 @@ export const useVizStore = create<State & Actions>()(
     items: {},
     order: [],
     watches: [],
+    watchStatus: {},
     selectedId: null,
     followLatest: true,
     hydrated: false,
@@ -137,13 +141,19 @@ export const useVizStore = create<State & Actions>()(
 
     addWatch: (w) => set((s) => ({ watches: [...s.watches, w] })),
     removeWatch: (id) =>
-      set((s) => ({
-        watches: s.watches.filter((w) => w.id !== id),
-        items: Object.fromEntries(
-          Object.entries(s.items).filter(([_, it]) => it.watch_id !== id)
-        ),
-        order: s.order.filter((k) => !k.startsWith(`${id}::`)),
-      })),
+      set((s) => {
+        const { [id]: _dropped, ...remainingStatus } = s.watchStatus;
+        return {
+          watches: s.watches.filter((w) => w.id !== id),
+          watchStatus: remainingStatus,
+          items: Object.fromEntries(
+            Object.entries(s.items).filter(([_, it]) => it.watch_id !== id),
+          ),
+          order: s.order.filter((k) => !k.startsWith(`${id}::`)),
+        };
+      }),
+    setWatchStatus: (id, status) =>
+      set((s) => ({ watchStatus: { ...s.watchStatus, [id]: status } })),
 
     select: (id) => set({ selectedId: id, followLatest: false }),
 
