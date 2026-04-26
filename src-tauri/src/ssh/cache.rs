@@ -167,13 +167,40 @@ pub async fn fetch_html_siblings(
     Ok(fetched)
 }
 
+/// Lightweight, pure view of the metadata bits we use for cache validation. Keeps
+/// `is_cache_valid` testable without touching the filesystem.
+pub(crate) struct CacheMetaView {
+    pub size: u64,
+    pub mtime_ms: i64,
+}
+
+/// Pure cache-validity predicate. Sized-then-mtime check that tolerates coarse-grained mtime
+/// reporting (NFS at 2s, FAT/SSHFS combos) while still bailing on truly stale or
+/// implausibly-far-future local files.
+///
+/// Rules:
+///   1. size must match exactly,
+///   2. local mtime must be at least the remote mtime (so we never serve a stale local copy),
+///   3. local mtime must not exceed remote mtime by more than 24h (forward-skew cap so a
+///      `touch` far in the future doesn't pin the cache forever).
+pub(crate) fn is_cache_valid(local: &CacheMetaView, remote: &CacheMetaView) -> bool {
+    const FORWARD_SKEW_CAP_MS: i64 = 24 * 3600 * 1000;
+    if local.size != remote.size {
+        return false;
+    }
+    if local.mtime_ms < remote.mtime_ms {
+        return false;
+    }
+    if local.mtime_ms.saturating_sub(remote.mtime_ms) > FORWARD_SKEW_CAP_MS {
+        return false;
+    }
+    true
+}
+
 fn cache_hit(local: &Path, remote_mtime_ms: i64, remote_size: u64) -> bool {
     let Ok(meta) = std::fs::metadata(local) else {
         return false;
     };
-    if meta.len() != remote_size {
-        return false;
-    }
     let Ok(mtime) = meta.modified() else {
         return false;
     };
@@ -181,8 +208,16 @@ fn cache_hit(local: &Path, remote_mtime_ms: i64, remote_size: u64) -> bool {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    // Allow ±1s slack — different filesystems round mtime differently.
-    (local_ms - remote_mtime_ms).abs() <= 1000
+    is_cache_valid(
+        &CacheMetaView {
+            size: meta.len(),
+            mtime_ms: local_ms,
+        },
+        &CacheMetaView {
+            size: remote_size,
+            mtime_ms: remote_mtime_ms,
+        },
+    )
 }
 
 async fn download_atomic(sftp: &SftpSession, remote_path: &str, local: &Path) -> Result<()> {
@@ -274,4 +309,108 @@ fn walk<F: FnMut(&Path, &std::fs::Metadata)>(root: &Path, f: &mut F) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_cache_valid (pure) -----------------------------------------------------------
+
+    #[test]
+    fn is_cache_valid_size_mismatch() {
+        let local = CacheMetaView {
+            size: 100,
+            mtime_ms: 1_000_000,
+        };
+        let remote = CacheMetaView {
+            size: 200,
+            mtime_ms: 1_000_000,
+        };
+        assert!(!is_cache_valid(&local, &remote));
+    }
+
+    #[test]
+    fn is_cache_valid_mtime_equal() {
+        let local = CacheMetaView {
+            size: 4096,
+            mtime_ms: 1_700_000_000_000,
+        };
+        let remote = CacheMetaView {
+            size: 4096,
+            mtime_ms: 1_700_000_000_000,
+        };
+        assert!(is_cache_valid(&local, &remote));
+    }
+
+    #[test]
+    fn is_cache_valid_local_newer() {
+        // Local mtime up to 24h ahead of remote is fine — covers coarse mtime + small skew.
+        let remote_ms: i64 = 1_700_000_000_000;
+        let local = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms + 5_000, // 5s ahead
+        };
+        let remote = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms,
+        };
+        assert!(is_cache_valid(&local, &remote));
+    }
+
+    #[test]
+    fn is_cache_valid_local_older() {
+        // Local strictly older than remote — file changed upstream, must re-fetch.
+        let remote_ms: i64 = 1_700_000_000_000;
+        let local = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms - 1,
+        };
+        let remote = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms,
+        };
+        assert!(!is_cache_valid(&local, &remote));
+    }
+
+    #[test]
+    fn is_cache_valid_size_zero_edge_case() {
+        // Both zero, equal mtime → valid.
+        let local = CacheMetaView {
+            size: 0,
+            mtime_ms: 1_700_000_000_000,
+        };
+        let remote = CacheMetaView {
+            size: 0,
+            mtime_ms: 1_700_000_000_000,
+        };
+        assert!(is_cache_valid(&local, &remote));
+
+        // Zero local against non-zero remote → invalid.
+        let local_zero = CacheMetaView {
+            size: 0,
+            mtime_ms: 1_700_000_000_000,
+        };
+        let remote_nonzero = CacheMetaView {
+            size: 10,
+            mtime_ms: 1_700_000_000_000,
+        };
+        assert!(!is_cache_valid(&local_zero, &remote_nonzero));
+    }
+
+    #[test]
+    fn is_cache_valid_local_implausibly_far_ahead() {
+        // Local more than 24h ahead of remote → stale (someone touched it into the future).
+        let remote_ms: i64 = 1_700_000_000_000;
+        let twenty_five_hours_ms: i64 = 25 * 3600 * 1000;
+        let local = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms + twenty_five_hours_ms,
+        };
+        let remote = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms,
+        };
+        assert!(!is_cache_valid(&local, &remote));
+    }
 }
