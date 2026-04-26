@@ -13,6 +13,7 @@ import { useVizStore } from "../store/vizStore";
 import { FollowToggle } from "./FollowToggle";
 import { ConnectRemoteDialog } from "./ConnectRemoteDialog";
 import { tauri } from "../lib/tauri";
+import { swallowWithLog } from "../lib/log";
 import type { Watch, WatchStatus } from "../types";
 
 export function TopBar() {
@@ -47,12 +48,12 @@ export function TopBar() {
 
   const onToggleFollow = () => {
     toggleFollow();
-    tauri.setFollowLatest(!followLatest).catch(() => {});
+    tauri.setFollowLatest(!followLatest).catch(swallowWithLog("TopBar: setFollowLatest"));
   };
 
   const onClear = async () => {
     clearGalleryStore();
-    await tauri.clearGallery().catch(() => {});
+    await tauri.clearGallery().catch(swallowWithLog("TopBar: clearGallery"));
   };
 
   return (
@@ -88,7 +89,7 @@ export function TopBar() {
               // a rescan so any files added since the last scan appear without a restart.
               // No-op for SSH (the SFTP poller handles its own refresh cadence).
               if (next === w.id && w.source.kind === "local") {
-                tauri.rescanWatch(w.id).catch(() => {});
+                tauri.rescanWatch(w.id).catch(swallowWithLog(`TopBar: rescanWatch(${w.id})`));
               }
             }}
             onRemove={async () => {
@@ -224,7 +225,7 @@ function StatusBadge({ status, watchId }: { status: WatchStatus; watchId: string
       {label}
       {canReconnect && (
         <button
-          onClick={() => tauri.reconnectWatch(watchId).catch(() => {})}
+          onClick={() => tauri.reconnectWatch(watchId).catch(swallowWithLog(`TopBar: reconnectWatch(${watchId})`))}
           title="Reconnect"
           className="ml-0.5 opacity-70 hover:opacity-100"
         >

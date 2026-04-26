@@ -7,6 +7,7 @@ import { TopBar } from "./components/TopBar";
 import { FirstRunPicker } from "./components/FirstRunPicker";
 import { prefetchRemoteFile, invalidateRemoteAsset } from "./components/RemoteAssetGate";
 import { useHotkeys } from "./lib/hotkeys";
+import { swallowWithLog } from "./lib/log";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 export default function App() {
@@ -79,7 +80,7 @@ export default function App() {
     onToggleFollow: () => {
       toggleFollow();
       const next = useVizStore.getState().followLatest;
-      tauri.setFollowLatest(next).catch(() => {});
+      tauri.setFollowLatest(next).catch(swallowWithLog("App: hotkey toggle setFollowLatest"));
     },
     onToggleFullscreen: () => {
       // Future: actual fullscreen mode. For now: scroll selected into view.
@@ -87,7 +88,7 @@ export default function App() {
     onRevealOnDisk: () => {
       const { selectedId, items } = useVizStore.getState();
       const item = selectedId ? items[selectedId] : null;
-      if (item) revealItemInDir(item.abs_path).catch(() => {});
+      if (item) revealItemInDir(item.abs_path).catch(swallowWithLog("App: hotkey revealItemInDir"));
     },
   });
 
