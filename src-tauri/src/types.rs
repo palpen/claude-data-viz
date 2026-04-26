@@ -13,7 +13,7 @@ pub enum VizKind {
     Svg,
     Html,
     Pdf,
-    Other,
+    Csv,
 }
 
 impl VizKind {
@@ -27,6 +27,7 @@ impl VizKind {
             "svg" => Some(Self::Svg),
             "html" | "htm" => Some(Self::Html),
             "pdf" => Some(Self::Pdf),
+            "csv" => Some(Self::Csv),
             _ => None,
         }
     }
@@ -53,6 +54,10 @@ pub struct VizItem {
     pub mtime: i64,
     pub prompt: Option<String>,
     pub tool_use_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
     pub status: VizStatus,
 }
 
@@ -75,6 +80,8 @@ pub struct VizEnriched {
     pub abs_path: String,
     pub prompt: String,
     pub tool_use_id: Option<String>,
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

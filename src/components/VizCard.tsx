@@ -1,16 +1,9 @@
 import { clsx } from "clsx";
 import { formatDistanceToNow } from "date-fns";
-import { FileImage, FileText, Code2, FileQuestion, MessageSquare } from "lucide-react";
+import { MessageSquare } from "lucide-react";
 import { convertFileSrc } from "../lib/tauri";
 import type { VizItem } from "../types";
-import { isImageKind, kindLabel } from "../lib/mime";
-
-const iconForKind = (kind: VizItem["kind"]) => {
-  if (isImageKind(kind) || kind === "svg") return FileImage;
-  if (kind === "html") return Code2;
-  if (kind === "pdf") return FileText;
-  return FileQuestion;
-};
+import { iconForKind, labelForKind, rendersInlineImagePreview } from "../viewers";
 
 function basename(p: string): string {
   const parts = p.split("/");
@@ -27,7 +20,7 @@ export function VizCard({
   onClick: () => void;
 }) {
   const Icon = iconForKind(item.kind);
-  const isImage = isImageKind(item.kind) || item.kind === "svg";
+  const isImage = rendersInlineImagePreview(item.kind);
   const isDeleted = item.status === "deleted";
 
   return (
@@ -68,7 +61,7 @@ export function VizCard({
           {basename(item.rel_path)}
         </div>
         <div className="text-[10px] text-[color:var(--color-text-dim)] truncate flex gap-1.5 items-center mt-0.5 opacity-70">
-          <span className="uppercase tracking-wide">{kindLabel(item.kind)}</span>
+          <span className="uppercase tracking-wide">{labelForKind(item.kind)}</span>
           <span>·</span>
           <span>{formatDistanceToNow(item.mtime, { addSuffix: true })}</span>
           {isDeleted && <span className="text-red-400">· deleted</span>}

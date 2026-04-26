@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import { readTextFile } from "@tauri-apps/plugin-fs";
+import { Code2 } from "lucide-react";
 import { convertFileSrc } from "../lib/tauri";
+import type { VizItem } from "../types";
+import type { ViewerDefinition } from "./registry";
 
 const INLINE_LIMIT = 10 * 1024 * 1024; // 10 MB
 
-export function HtmlView({ absPath, size, mtime }: { absPath: string; size: number; mtime: number }) {
+function HtmlView({ item }: { item: VizItem }) {
+  const { abs_path: absPath, size, mtime } = item;
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -61,3 +65,9 @@ export function HtmlView({ absPath, size, mtime }: { absPath: string; size: numb
     />
   );
 }
+
+export const htmlViewer: ViewerDefinition = {
+  kinds: ["html"],
+  icon: Code2,
+  Component: HtmlView,
+};

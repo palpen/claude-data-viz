@@ -186,6 +186,8 @@ fn upsert_preserving_enrichment(
         VizItem {
             prompt: existing.prompt.clone(),
             tool_use_id: existing.tool_use_id.clone(),
+            session_id: existing.session_id.clone(),
+            cwd: existing.cwd.clone(),
             ..fresh
         }
     } else {
@@ -302,11 +304,14 @@ fn build_item(watch_id: &str, root: &Path, path: &Path, meta: &std::fs::Metadata
         watch_id: watch_id.to_string(),
         abs_path: abs,
         rel_path: rel,
-        kind: VizKind::from_path(path).unwrap_or(VizKind::Other),
+        kind: VizKind::from_path(path)
+            .expect("watcher already filtered to known kinds via VizKind::from_path"),
         size: meta.len(),
         mtime,
         prompt: None,
         tool_use_id: None,
+        session_id: None,
+        cwd: None,
         status: VizStatus::Active,
     }
 }

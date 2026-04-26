@@ -33,3 +33,4 @@ dist-ssr
 
 # Claude Code local state
 .claude/
+.gstack/

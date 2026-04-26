@@ -1,18 +1,10 @@
-import { useEffect, useRef } from "react";
-import {
-  TransformWrapper,
-  TransformComponent,
-  type ReactZoomPanPinchRef,
-} from "react-zoom-pan-pinch";
-import { tinykeys } from "tinykeys";
+import { useState } from "react";
 import { useVizStore } from "../store/vizStore";
-import { convertFileSrc } from "../lib/tauri";
-import { isImageKind } from "../lib/mime";
-import { HtmlView } from "./HtmlView";
-import { PdfView } from "./PdfView";
 import { EmptyState } from "./EmptyState";
+import { pickViewer } from "../viewers";
 import { formatDistanceToNow } from "date-fns";
-import { MessageSquare, ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
+import { Check, Copy, MessageSquare } from "lucide-react";
+import type { VizItem } from "../types";
 
 export function Viewer() {
   const selectedId = useVizStore((s) => s.selectedId);
@@ -47,130 +39,100 @@ export function Viewer() {
           <span>·</span>
           <span>{formatDistanceToNow(item.mtime, { addSuffix: true })}</span>
         </div>
+        <MoreInfo item={item} />
       </div>
-      <div className="flex-1 min-h-0 overflow-hidden">
-        {renderBody(item)}
-      </div>
+      <div className="flex-1 min-h-0 overflow-hidden">{renderBody(item)}</div>
     </div>
   );
 }
 
-type Item = ReturnType<typeof useVizStore.getState>["items"][string];
-
-function renderBody(item: Item) {
-  if (isImageKind(item.kind) || item.kind === "svg") {
-    return <ImageView key={item.abs_path} item={item} />;
+function renderBody(item: VizItem) {
+  const def = pickViewer(item.kind);
+  if (!def) {
+    return <EmptyState message={`Unsupported file type: ${item.kind}`} />;
   }
-  if (item.kind === "html") {
-    return <HtmlView absPath={item.abs_path} size={item.size} mtime={item.mtime} />;
-  }
-  if (item.kind === "pdf") {
-    return <PdfView absPath={item.abs_path} mtime={item.mtime} />;
-  }
-  return <EmptyState message={`Unsupported file type: ${item.kind}`} />;
-}
-
-function ImageView({ item }: { item: Item }) {
-  const ref = useRef<ReactZoomPanPinchRef | null>(null);
-
-  useEffect(() => {
-    return tinykeys(window, {
-      "0": (e) => {
-        if (isTypingTarget(e.target)) return;
-        e.preventDefault();
-        ref.current?.resetTransform();
-      },
-      "=": (e) => {
-        if (isTypingTarget(e.target)) return;
-        e.preventDefault();
-        ref.current?.zoomIn();
-      },
-      "+": (e) => {
-        if (isTypingTarget(e.target)) return;
-        e.preventDefault();
-        ref.current?.zoomIn();
-      },
-      "-": (e) => {
-        if (isTypingTarget(e.target)) return;
-        e.preventDefault();
-        ref.current?.zoomOut();
-      },
-    });
-  }, []);
-
-  return (
-    <div className="relative w-full h-full">
-      <TransformWrapper
-        ref={ref}
-        minScale={0.5}
-        maxScale={20}
-        centerOnInit
-        limitToBounds={false}
-        wheel={{ step: 0.05 }}
-        pinch={{ step: 2 }}
-        doubleClick={{ mode: "zoomIn", step: 1 }}
-      >
-        {({ zoomIn, zoomOut, resetTransform }) => (
-          <>
-            <div className="absolute top-2 right-2 z-10 flex gap-1">
-              <ZoomButton onClick={() => zoomIn()} label="Zoom in (+)">
-                <ZoomIn className="w-3.5 h-3.5" />
-              </ZoomButton>
-              <ZoomButton onClick={() => zoomOut()} label="Zoom out (-)">
-                <ZoomOut className="w-3.5 h-3.5" />
-              </ZoomButton>
-              <ZoomButton onClick={() => resetTransform()} label="Reset zoom (0)">
-                <Maximize2 className="w-3.5 h-3.5" />
-              </ZoomButton>
-            </div>
-            <TransformComponent
-              wrapperClass="!w-full !h-full"
-              contentClass="!w-full !h-full flex items-center justify-center p-4"
-            >
-              <img
-                src={`${convertFileSrc(item.abs_path)}?v=${item.mtime}`}
-                alt={item.rel_path}
-                className="max-w-full max-h-full object-contain select-none"
-                draggable={false}
-              />
-            </TransformComponent>
-          </>
-        )}
-      </TransformWrapper>
-    </div>
-  );
-}
-
-function ZoomButton({
-  onClick,
-  label,
-  children,
-}: {
-  onClick: () => void;
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      className="flex items-center justify-center w-7 h-7 rounded bg-[color:var(--color-surface-2)] border border-[color:var(--color-border)] text-[color:var(--color-text-dim)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-surface)] transition-colors"
-    >
-      {children}
-    </button>
-  );
-}
-
-function isTypingTarget(target: EventTarget | null): boolean {
-  if (!target || !(target instanceof HTMLElement)) return false;
-  const t = target.tagName;
-  return t === "INPUT" || t === "TEXTAREA" || target.isContentEditable;
+  return <def.Component item={item} />;
 }
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function MoreInfo({ item }: { item: VizItem }) {
+  const sessionId = item.session_id;
+  const cwd = item.cwd;
+  if (!sessionId && !cwd) return null;
+
+  const resumeCmd = sessionId ? `claude --resume ${sessionId}` : null;
+  const transcriptPath =
+    sessionId && cwd
+      ? `~/.claude/projects/${cwd.replace(/\//g, "-")}/${sessionId}.jsonl`
+      : null;
+
+  return (
+    <details className="mt-1.5 ml-5 text-[11px] text-[color:var(--color-text-dim)] group/details">
+      <summary className="cursor-pointer hover:text-[color:var(--color-text)] select-none list-none flex items-center gap-1 marker:hidden">
+        <span className="inline-block transition-transform group-open/details:rotate-90">▸</span>
+        <span>More info</span>
+      </summary>
+      <dl className="mt-1.5 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 pl-3.5">
+        {sessionId && (
+          <>
+            <dt className="text-[color:var(--color-text-dim)]">session</dt>
+            <dd className="font-mono flex items-center gap-1.5 min-w-0">
+              <span className="truncate">{sessionId}</span>
+              <CopyButton text={sessionId} label="Copy session ID" />
+            </dd>
+          </>
+        )}
+        {cwd && (
+          <>
+            <dt>project</dt>
+            <dd className="font-mono truncate" title={cwd}>{cwd}</dd>
+          </>
+        )}
+        {transcriptPath && (
+          <>
+            <dt>transcript</dt>
+            <dd className="font-mono truncate" title={transcriptPath}>{transcriptPath}</dd>
+          </>
+        )}
+        {resumeCmd && (
+          <>
+            <dt>resume</dt>
+            <dd className="font-mono flex items-center gap-1.5 min-w-0">
+              <span className="truncate">{resumeCmd}</span>
+              <CopyButton text={resumeCmd} label="Copy resume command" />
+            </dd>
+          </>
+        )}
+      </dl>
+    </details>
+  );
+}
+
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async (e) => {
+        e.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1200);
+        } catch {
+          // noop — clipboard refusal in some webviews; UI just won't flip to "copied"
+        }
+      }}
+      title={label}
+      aria-label={label}
+      className="flex-shrink-0 text-[color:var(--color-text-dim)] hover:text-[color:var(--color-text)] transition-colors"
+    >
+      {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+    </button>
+  );
 }

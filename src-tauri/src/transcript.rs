@@ -34,6 +34,9 @@ struct RawEnvelope {
     #[serde(rename = "type")]
     kind: Option<String>,
     timestamp: Option<String>,
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    cwd: Option<String>,
     message: Option<RawMessage>,
 }
 
@@ -57,20 +60,42 @@ pub struct ToolEntry {
     /// Combined text of the tool_result content blocks, truncated to MAX_OUTPUT_BYTES. Used
     /// to catch flows like `python plot.py` where the file path appears only in stdout.
     pub result_output: Option<String>,
+    /// Claude Code session UUID (filename stem of the JSONL the entry came from).
+    pub session_id: Option<String>,
+    /// Working directory the Claude Code session was launched in.
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct UserPromptEntry {
+    ts_ms: i64,
+    text: String,
+    session_id: Option<String>,
+    cwd: Option<String>,
+}
+
+/// Result of a successful prompt-to-file attribution. Always carries a prompt; the rest is
+/// best-effort metadata the UI can use for "more info".
+#[derive(Debug, Clone)]
+pub struct LookupHit {
+    pub prompt: String,
+    pub tool_use_id: Option<String>,
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct TranscriptIndex {
-    last_user_prompt: Option<(i64, String)>,
+    last_user_prompt: Option<UserPromptEntry>,
     tools: VecDeque<ToolEntry>,
 }
 
 impl TranscriptIndex {
     /// Four-tier matcher. Tighter tiers run first; we fall through only when nothing better
-    /// is available. The returned `Option<String>` (second element) carries the tool_use_id
-    /// when the match came from a specific tool call — that's the deterministic signal the UI
-    /// can later use for "show me this exact tool invocation".
-    pub fn lookup(&self, mtime_ms: i64, abs_path: &str) -> Option<(String, Option<String>)> {
+    /// is available. `LookupHit::tool_use_id` is set when the match came from a specific tool
+    /// call (Tiers 1–2); `session_id`/`cwd` are best-effort and propagate from the JSONL
+    /// envelope that produced the matched entry.
+    pub fn lookup(&self, mtime_ms: i64, abs_path: &str) -> Option<LookupHit> {
         // Tier 1 — Deterministic. Tool result completed close to file mtime AND input/output
         // mentions the path. Strongest possible signal: the tool was active when the file
         // appeared AND the tool explicitly named the file.
@@ -82,7 +107,7 @@ impl TranscriptIndex {
                 && tool_mentions_path(tool, abs_path)
             {
                 if let Some(p) = tool.preceding_prompt.clone() {
-                    return Some((p, Some(tool.tool_use_id.clone())));
+                    return Some(hit_from_tool(p, tool));
                 }
             }
         }
@@ -99,7 +124,7 @@ impl TranscriptIndex {
             };
             if (mtime_ms - result_ts).abs() <= TIGHT_MATCH_WINDOW_MS {
                 if let Some(p) = tool.preceding_prompt.clone() {
-                    return Some((p, Some(tool.tool_use_id.clone())));
+                    return Some(hit_from_tool(p, tool));
                 }
             }
         }
@@ -112,7 +137,7 @@ impl TranscriptIndex {
                 && tool_mentions_path(tool, abs_path)
             {
                 if let Some(p) = tool.preceding_prompt.clone() {
-                    return Some((p, Some(tool.tool_use_id.clone())));
+                    return Some(hit_from_tool(p, tool));
                 }
             }
         }
@@ -120,12 +145,26 @@ impl TranscriptIndex {
         // Tier 3 — Fallback. Most recent user prompt within ±30s, no tool_use_id. The "guess"
         // path: we know roughly when the user asked, and we know a file appeared, but we
         // can't pin it to a specific tool call.
-        if let Some((ts, text)) = &self.last_user_prompt {
-            if (mtime_ms - ts).abs() <= MATCH_WINDOW_MS {
-                return Some((text.clone(), None));
+        if let Some(entry) = &self.last_user_prompt {
+            if (mtime_ms - entry.ts_ms).abs() <= MATCH_WINDOW_MS {
+                return Some(LookupHit {
+                    prompt: entry.text.clone(),
+                    tool_use_id: None,
+                    session_id: entry.session_id.clone(),
+                    cwd: entry.cwd.clone(),
+                });
             }
         }
         None
+    }
+}
+
+fn hit_from_tool(prompt: String, tool: &ToolEntry) -> LookupHit {
+    LookupHit {
+        prompt,
+        tool_use_id: Some(tool.tool_use_id.clone()),
+        session_id: tool.session_id.clone(),
+        cwd: tool.cwd.clone(),
     }
 }
 
@@ -302,12 +341,20 @@ fn process_line(index: &SharedIndex, line: &str) {
         .and_then(parse_iso8601_ms)
         .unwrap_or_else(|| Utc::now().timestamp_millis());
 
+    let session_id = envelope.session_id.clone();
+    let cwd = envelope.cwd.clone();
+
     match envelope.kind.as_deref() {
         Some("user") => {
             // A "user" envelope is either a typed prompt OR a wrapper for tool_result blocks.
             // Both branches can in theory coexist, so handle them independently.
             if let Some(text) = extract_user_prompt(envelope.message.as_ref()) {
-                index.lock().last_user_prompt = Some((ts_ms, text));
+                index.lock().last_user_prompt = Some(UserPromptEntry {
+                    ts_ms,
+                    text,
+                    session_id: session_id.clone(),
+                    cwd: cwd.clone(),
+                });
             }
             let results = extract_tool_results(envelope.message.as_ref());
             if !results.is_empty() {
@@ -326,14 +373,25 @@ fn process_line(index: &SharedIndex, line: &str) {
             }
         }
         Some("assistant") => {
-            let prompt = index.lock().last_user_prompt.as_ref().map(|(_, p)| p.clone());
-            extract_tool_uses(envelope.message.as_ref(), ts_ms, &prompt, |entry| {
-                let mut idx = index.lock();
-                if idx.tools.len() == TOOL_RING_CAP {
-                    idx.tools.pop_front();
-                }
-                idx.tools.push_back(entry);
-            });
+            let prompt = index
+                .lock()
+                .last_user_prompt
+                .as_ref()
+                .map(|e| e.text.clone());
+            extract_tool_uses(
+                envelope.message.as_ref(),
+                ts_ms,
+                &prompt,
+                session_id.as_deref(),
+                cwd.as_deref(),
+                |entry| {
+                    let mut idx = index.lock();
+                    if idx.tools.len() == TOOL_RING_CAP {
+                        idx.tools.pop_front();
+                    }
+                    idx.tools.push_back(entry);
+                },
+            );
         }
         _ => {}
     }
@@ -374,6 +432,8 @@ fn extract_tool_uses<F: FnMut(ToolEntry)>(
     msg: Option<&RawMessage>,
     ts_ms: i64,
     preceding_prompt: &Option<String>,
+    session_id: Option<&str>,
+    cwd: Option<&str>,
     mut sink: F,
 ) {
     let arr = match msg.and_then(|m| m.content.as_array()) {
@@ -395,6 +455,8 @@ fn extract_tool_uses<F: FnMut(ToolEntry)>(
             preceding_prompt: preceding_prompt.clone(),
             result_ts_ms: None,
             result_output: None,
+            session_id: session_id.map(String::from),
+            cwd: cwd.map(String::from),
         });
     }
 }
@@ -502,25 +564,27 @@ fn enrich_pending_all(app: &AppHandle, state: &Arc<AppState>, index: &SharedInde
     if pending.is_empty() {
         return;
     }
-    let resolved: Vec<(String, String, String, Option<String>)> = {
+    let resolved: Vec<(String, String, LookupHit)> = {
         let idx = index.lock();
         pending
             .into_iter()
             .filter_map(|(watch_id, abs_path, mtime)| {
                 idx.lookup(mtime, &abs_path)
-                    .map(|(p, tu)| (watch_id, abs_path, p, tu))
+                    .map(|hit| (watch_id, abs_path, hit))
             })
             .collect()
     };
     let mut any_enriched = false;
-    for (watch_id, abs_path, prompt, tool_use_id) in resolved {
+    for (watch_id, abs_path, hit) in resolved {
         let already = {
             let mut items = state.items.lock();
             let key = (watch_id.clone(), abs_path.clone());
             match items.get_mut(&key) {
                 Some(item) if item.prompt.is_none() => {
-                    item.prompt = Some(prompt.clone());
-                    item.tool_use_id = tool_use_id.clone();
+                    item.prompt = Some(hit.prompt.clone());
+                    item.tool_use_id = hit.tool_use_id.clone();
+                    item.session_id = hit.session_id.clone();
+                    item.cwd = hit.cwd.clone();
                     false
                 }
                 _ => true,
@@ -535,8 +599,10 @@ fn enrich_pending_all(app: &AppHandle, state: &Arc<AppState>, index: &SharedInde
             VizEnriched {
                 watch_id,
                 abs_path,
-                prompt,
-                tool_use_id,
+                prompt: hit.prompt,
+                tool_use_id: hit.tool_use_id,
+                session_id: hit.session_id,
+                cwd: hit.cwd,
             },
         );
     }
@@ -554,15 +620,17 @@ pub fn try_enrich_now(
     abs_path: &str,
     mtime_ms: i64,
 ) {
-    let Some((prompt, tool_use_id)) = index.lock().lookup(mtime_ms, abs_path) else {
+    let Some(hit) = index.lock().lookup(mtime_ms, abs_path) else {
         return;
     };
     let mutated = {
         let key = (watch_id.to_string(), abs_path.to_string());
         let mut items = state.items.lock();
         if let Some(item) = items.get_mut(&key) {
-            item.prompt = Some(prompt.clone());
-            item.tool_use_id = tool_use_id.clone();
+            item.prompt = Some(hit.prompt.clone());
+            item.tool_use_id = hit.tool_use_id.clone();
+            item.session_id = hit.session_id.clone();
+            item.cwd = hit.cwd.clone();
             true
         } else {
             false
@@ -576,8 +644,10 @@ pub fn try_enrich_now(
         VizEnriched {
             watch_id: watch_id.to_string(),
             abs_path: abs_path.to_string(),
-            prompt,
-            tool_use_id,
+            prompt: hit.prompt,
+            tool_use_id: hit.tool_use_id,
+            session_id: hit.session_id,
+            cwd: hit.cwd,
         },
     );
 }
@@ -648,6 +718,8 @@ mod tests {
             preceding_prompt: prompt.map(String::from),
             result_ts_ms: None,
             result_output: None,
+            session_id: None,
+            cwd: None,
         }
     }
 
@@ -661,13 +733,22 @@ mod tests {
              "input": {"command": "python plot.py"}},
         ]));
         let mut out: Vec<ToolEntry> = vec![];
-        extract_tool_uses(Some(&m), 1000, &Some("p".into()), |e| out.push(e));
+        extract_tool_uses(
+            Some(&m),
+            1000,
+            &Some("p".into()),
+            Some("sess-uuid"),
+            Some("/Users/x/proj"),
+            |e| out.push(e),
+        );
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].tool_use_id, "tu_1");
         assert_eq!(out[1].name, "Bash");
         assert_eq!(out[0].preceding_prompt.as_deref(), Some("p"));
         assert!(out[0].result_ts_ms.is_none());
         assert!(out[0].result_output.is_none());
+        assert_eq!(out[0].session_id.as_deref(), Some("sess-uuid"));
+        assert_eq!(out[1].cwd.as_deref(), Some("/Users/x/proj"));
     }
 
     #[test]
@@ -747,7 +828,12 @@ mod tests {
     #[test]
     fn lookup_prefers_tool_match_with_prompt() {
         let mut idx = TranscriptIndex::default();
-        idx.last_user_prompt = Some((1000, "old prompt".into()));
+        idx.last_user_prompt = Some(UserPromptEntry {
+            ts_ms: 1000,
+            text: "old prompt".into(),
+            session_id: None,
+            cwd: None,
+        });
         idx.tools.push_back(mk_tool(
             "Write",
             5000,
@@ -755,9 +841,9 @@ mod tests {
             json!({"file_path": "/tmp/p.png"}),
             Some("the right prompt"),
         ));
-        let (prompt, tu) = idx.lookup(5100, "/tmp/p.png").unwrap();
-        assert_eq!(prompt, "the right prompt");
-        assert_eq!(tu.as_deref(), Some("tu"));
+        let hit = idx.lookup(5100, "/tmp/p.png").unwrap();
+        assert_eq!(hit.prompt, "the right prompt");
+        assert_eq!(hit.tool_use_id.as_deref(), Some("tu"));
     }
 
     #[test]
@@ -774,14 +860,24 @@ mod tests {
         );
         tool.result_ts_ms = Some(5000);
         tool.result_output = Some("Saved to /tmp/p.png".into());
+        tool.session_id = Some("sess-1".into());
+        tool.cwd = Some("/proj".into());
         idx.tools.push_back(tool);
 
         // Also add a more recent user prompt that would tempt Tier 3.
-        idx.last_user_prompt = Some((5050, "different prompt".into()));
+        idx.last_user_prompt = Some(UserPromptEntry {
+            ts_ms: 5050,
+            text: "different prompt".into(),
+            session_id: None,
+            cwd: None,
+        });
 
-        let (prompt, tu) = idx.lookup(5100, "/tmp/p.png").unwrap();
-        assert_eq!(prompt, "plot sin(x)");
-        assert_eq!(tu.as_deref(), Some("tu"));
+        let hit = idx.lookup(5100, "/tmp/p.png").unwrap();
+        assert_eq!(hit.prompt, "plot sin(x)");
+        assert_eq!(hit.tool_use_id.as_deref(), Some("tu"));
+        // session_id and cwd propagate from the matched tool entry.
+        assert_eq!(hit.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(hit.cwd.as_deref(), Some("/proj"));
     }
 
     #[test]
@@ -800,11 +896,16 @@ mod tests {
         tool.result_output = Some("Saved to /tmp/p.png".into());
         idx.tools.push_back(tool);
 
-        idx.last_user_prompt = Some((24_000, "different prompt".into()));
+        idx.last_user_prompt = Some(UserPromptEntry {
+            ts_ms: 24_000,
+            text: "different prompt".into(),
+            session_id: None,
+            cwd: None,
+        });
 
-        let (prompt, tu) = idx.lookup(25_000, "/tmp/p.png").unwrap();
-        assert_eq!(prompt, "plot sin(x)");
-        assert_eq!(tu.as_deref(), Some("tu"));
+        let hit = idx.lookup(25_000, "/tmp/p.png").unwrap();
+        assert_eq!(hit.prompt, "plot sin(x)");
+        assert_eq!(hit.tool_use_id.as_deref(), Some("tu"));
     }
 
     #[test]
@@ -827,12 +928,17 @@ mod tests {
         idx.tools.push_back(tool);
 
         // The user's original prompt is OLD (90s before the file) — outside Tier 3 window.
-        idx.last_user_prompt = Some((10_000 - 90_000, "different older prompt".into()));
+        idx.last_user_prompt = Some(UserPromptEntry {
+            ts_ms: 10_000 - 90_000,
+            text: "different older prompt".into(),
+            session_id: None,
+            cwd: None,
+        });
 
         // File appeared 22ms before result_ts (essentially during tool execution).
-        let (prompt, tu) = idx.lookup(14_978, "/cwd/sin_plot.png").unwrap();
-        assert_eq!(prompt, "plot sin(x) and save to /tmp/plot.png. Run it");
-        assert_eq!(tu.as_deref(), Some("tu"));
+        let hit = idx.lookup(14_978, "/cwd/sin_plot.png").unwrap();
+        assert_eq!(hit.prompt, "plot sin(x) and save to /tmp/plot.png. Run it");
+        assert_eq!(hit.tool_use_id.as_deref(), Some("tu"));
     }
 
     #[test]
@@ -860,16 +966,29 @@ mod tests {
     #[test]
     fn lookup_falls_back_to_last_user_prompt_within_window() {
         let mut idx = TranscriptIndex::default();
-        idx.last_user_prompt = Some((10_000, "user said this".into()));
-        let (prompt, tu) = idx.lookup(15_000, "/tmp/p.png").unwrap();
-        assert_eq!(prompt, "user said this");
-        assert!(tu.is_none());
+        idx.last_user_prompt = Some(UserPromptEntry {
+            ts_ms: 10_000,
+            text: "user said this".into(),
+            session_id: Some("sess-fallback".into()),
+            cwd: Some("/proj".into()),
+        });
+        let hit = idx.lookup(15_000, "/tmp/p.png").unwrap();
+        assert_eq!(hit.prompt, "user said this");
+        assert!(hit.tool_use_id.is_none());
+        // Tier 3 also forwards session_id/cwd from the user-prompt envelope.
+        assert_eq!(hit.session_id.as_deref(), Some("sess-fallback"));
+        assert_eq!(hit.cwd.as_deref(), Some("/proj"));
     }
 
     #[test]
     fn lookup_returns_none_outside_window() {
         let mut idx = TranscriptIndex::default();
-        idx.last_user_prompt = Some((0, "stale".into()));
+        idx.last_user_prompt = Some(UserPromptEntry {
+            ts_ms: 0,
+            text: "stale".into(),
+            session_id: None,
+            cwd: None,
+        });
         // mtime - ts = 60s > 30s window
         assert!(idx.lookup(60_000, "/tmp/p.png").is_none());
     }

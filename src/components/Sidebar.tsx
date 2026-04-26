@@ -24,7 +24,7 @@ export function Sidebar() {
       <div className="px-3 py-2.5 border-b border-[color:var(--color-border)] text-[11px] uppercase tracking-wider text-[color:var(--color-text-dim)] flex items-center justify-between">
         <span>Recent ({order.length})</span>
       </div>
-      <div ref={parentRef} className="flex-1 overflow-auto">
+      <div ref={parentRef} className="flex-1 min-h-0 overflow-auto overscroll-contain">
         {order.length === 0 ? (
           <div className="px-3 py-4 text-xs text-[color:var(--color-text-dim)]">
             Waiting for visualizations…

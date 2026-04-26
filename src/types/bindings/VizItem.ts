@@ -2,4 +2,4 @@
 import type { VizKind } from "./VizKind";
 import type { VizStatus } from "./VizStatus";
 
-export type VizItem = { watch_id: string, abs_path: string, rel_path: string, kind: VizKind, size: number, mtime: number, prompt: string | null, tool_use_id: string | null, status: VizStatus, };
+export type VizItem = { watch_id: string, abs_path: string, rel_path: string, kind: VizKind, size: number, mtime: number, prompt: string | null, tool_use_id: string | null, session_id: string | null, cwd: string | null, status: VizStatus, };

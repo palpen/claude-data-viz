@@ -101,7 +101,13 @@ export const useVizStore = create<State & Actions>()(
         return {
           items: {
             ...s.items,
-            [id]: { ...existing, prompt: e.prompt, tool_use_id: e.tool_use_id ?? null },
+            [id]: {
+              ...existing,
+              prompt: e.prompt,
+              tool_use_id: e.tool_use_id ?? null,
+              session_id: e.session_id ?? null,
+              cwd: e.cwd ?? null,
+            },
           },
         };
       });

@@ -62,7 +62,7 @@ export default function App() {
 
   if (!hydrated) {
     return (
-      <div className="h-full flex items-center justify-center text-sm opacity-60">
+      <div className="h-screen flex items-center justify-center text-sm opacity-60">
         Loading…
       </div>
     );
@@ -73,9 +73,9 @@ export default function App() {
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-screen flex flex-col overflow-hidden">
       <TopBar />
-      <div className="flex-1 min-h-0 grid grid-cols-[300px_1fr]">
+      <div className="flex-1 min-h-0 grid grid-rows-1 grid-cols-[300px_1fr] overflow-hidden">
         <Sidebar />
         <Viewer />
       </div>
