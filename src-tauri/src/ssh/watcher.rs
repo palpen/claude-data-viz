@@ -30,6 +30,12 @@ use tokio::task::JoinHandle;
 const POLL_ACTIVE_MS: u64 = 2000;
 const POLL_IDLE_MS: u64 = 10_000;
 const RECURSION_DEPTH: usize = 4;
+#[allow(dead_code)]
+const BACKOFF_INITIAL_MS: u64 = 2_000;
+#[allow(dead_code)]
+const BACKOFF_MAX_MS: u64 = 300_000; // 5 min
+#[allow(dead_code)]
+const BACKOFF_JITTER: f64 = 0.2; // ±20%
 const SKIP_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -517,3 +523,212 @@ pub fn install(state: &Arc<AppState>, watcher: SshWatcher) {
 
 #[allow(dead_code)]
 fn _force_use(_: &PathBuf) {}
+
+/// Exponential-backoff-with-jitter state machine.
+///
+/// Pure (no I/O, no tokio dependency). Doubles `current_ms` after each `next_delay()` call,
+/// caps at `max_ms`, applies symmetric ±`jitter_frac` jitter, and resets to `min_ms` on
+/// `reset()`. Uses an inline LCG so behavior is deterministic given a seed — no `rand` crate
+/// pulled in for tests, no flakes.
+#[derive(Debug)]
+pub(crate) struct BackoffState {
+    current_ms: u64,
+    min_ms: u64,
+    max_ms: u64,
+    jitter_frac: f64,
+    rng_state: u64,
+}
+
+impl BackoffState {
+    pub fn new(min_ms: u64, max_ms: u64, jitter_frac: f64, seed: u64) -> Self {
+        Self {
+            current_ms: min_ms,
+            min_ms,
+            max_ms,
+            jitter_frac,
+            rng_state: seed.max(1),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.current_ms = self.min_ms;
+    }
+
+    pub fn next_delay(&mut self) -> Duration {
+        let base = self.current_ms;
+        // LCG (Knuth/MMIX constants) — fine for jitter, not for crypto.
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let r = (self.rng_state >> 32) as u32 as f64 / u32::MAX as f64; // 0..1
+        let frac = (r * 2.0 - 1.0) * self.jitter_frac; // -jitter..+jitter
+        let jittered = ((base as f64) * (1.0 + frac)).max(0.0) as u64;
+        self.current_ms = self.current_ms.saturating_mul(2).min(self.max_ms);
+        Duration::from_millis(jittered)
+    }
+}
+
+/// Pure helper that mirrors `set_status_and_maybe_emit`'s decision logic without side
+/// effects, so it can be unit-tested independently of Tauri's `AppHandle::emit`.
+pub(crate) struct StatusTransition;
+
+impl StatusTransition {
+    /// Returns the status that should be emitted, or `None` if the new status is equal to
+    /// the previous one. Equality is full structural `PartialEq` — payload differences in
+    /// `Reconnecting` (e.g. updated `last_error`) are treated as a transition.
+    pub fn diff(prev: &WatchStatus, next: &WatchStatus) -> Option<WatchStatus> {
+        if prev == next {
+            None
+        } else {
+            Some(next.clone())
+        }
+    }
+}
+
+/// Derive a deterministic LCG seed from a watch_id so two watchers picking concurrent
+/// jitter samples don't synchronize their reconnect storms.
+#[allow(dead_code)]
+pub(crate) fn seed_from_watch_id(watch_id: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    watch_id.hash(&mut h);
+    h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::WatchStatus;
+
+    #[test]
+    fn backoff_initial_delay_is_min() {
+        let mut b = BackoffState::new(2000, 300_000, 0.0, 1);
+        assert_eq!(b.next_delay(), Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn backoff_doubles_on_consecutive_errors() {
+        let mut b = BackoffState::new(2000, 300_000, 0.0, 1);
+        assert_eq!(b.next_delay(), Duration::from_millis(2000));
+        assert_eq!(b.next_delay(), Duration::from_millis(4000));
+        assert_eq!(b.next_delay(), Duration::from_millis(8000));
+        assert_eq!(b.next_delay(), Duration::from_millis(16000));
+    }
+
+    #[test]
+    fn backoff_caps_at_max() {
+        let mut b = BackoffState::new(2000, 10_000, 0.0, 1);
+        assert_eq!(b.next_delay(), Duration::from_millis(2000));
+        assert_eq!(b.next_delay(), Duration::from_millis(4000));
+        assert_eq!(b.next_delay(), Duration::from_millis(8000));
+        // Capped from here on.
+        for _ in 0..10 {
+            assert_eq!(b.next_delay(), Duration::from_millis(10_000));
+        }
+    }
+
+    #[test]
+    fn backoff_resets_on_success() {
+        let mut b = BackoffState::new(2000, 300_000, 0.0, 1);
+        b.next_delay(); // 2000
+        b.next_delay(); // 4000
+        b.next_delay(); // 8000
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn backoff_jitter_within_bounds() {
+        // jitter=0.2, base=4000 ⇒ delays must fall in [3200, 4800].
+        // Force base by stepping past initial: 2000 → step → 4000.
+        let lo = 3200u64;
+        let hi = 4800u64;
+        for sample_seed in 1..=50u64 {
+            let mut b = BackoffState::new(2000, 300_000, 0.2, sample_seed);
+            // Skip the 2000-base sample.
+            let _ = b.next_delay();
+            let d = b.next_delay().as_millis() as u64;
+            assert!(
+                d >= lo && d <= hi,
+                "seed {sample_seed}: delay {d} not in [{lo}, {hi}]"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_jitter_deterministic_with_same_seed() {
+        let mut a = BackoffState::new(2000, 300_000, 0.2, 7);
+        let mut b = BackoffState::new(2000, 300_000, 0.2, 7);
+        assert_eq!(a.next_delay(), b.next_delay());
+        assert_eq!(a.next_delay(), b.next_delay());
+        assert_eq!(a.next_delay(), b.next_delay());
+    }
+
+    #[test]
+    fn transition_emits_on_change() {
+        let prev = WatchStatus::Reconnecting {
+            since_ms: 100,
+            last_error: Some("boom".into()),
+        };
+        let next = WatchStatus::Connected;
+        assert_eq!(
+            StatusTransition::diff(&prev, &next),
+            Some(WatchStatus::Connected)
+        );
+    }
+
+    #[test]
+    fn transition_no_emit_on_same_status() {
+        // Two identical Connected statuses → no emit.
+        assert_eq!(
+            StatusTransition::diff(&WatchStatus::Connected, &WatchStatus::Connected),
+            None
+        );
+        // Two identical Reconnecting payloads → no emit.
+        let a = WatchStatus::Reconnecting {
+            since_ms: 100,
+            last_error: Some("x".into()),
+        };
+        let b = WatchStatus::Reconnecting {
+            since_ms: 100,
+            last_error: Some("x".into()),
+        };
+        assert_eq!(StatusTransition::diff(&a, &b), None);
+    }
+
+    #[test]
+    fn transition_emits_with_correct_payload() {
+        // Reconnecting → Connected emits Connected.
+        let prev = WatchStatus::Reconnecting {
+            since_ms: 100,
+            last_error: Some("a".into()),
+        };
+        let next = WatchStatus::Connected;
+        assert_eq!(
+            StatusTransition::diff(&prev, &next),
+            Some(WatchStatus::Connected)
+        );
+
+        // Reconnecting payload mutation (last_error a → b) emits the new Reconnecting.
+        let prev = WatchStatus::Reconnecting {
+            since_ms: 100,
+            last_error: Some("a".into()),
+        };
+        let next = WatchStatus::Reconnecting {
+            since_ms: 100,
+            last_error: Some("b".into()),
+        };
+        assert_eq!(StatusTransition::diff(&prev, &next), Some(next));
+    }
+
+    #[test]
+    fn seed_from_watch_id_is_stable_and_distinct() {
+        let a1 = seed_from_watch_id("watch-a");
+        let a2 = seed_from_watch_id("watch-a");
+        let b = seed_from_watch_id("watch-b");
+        assert_eq!(a1, a2);
+        assert_ne!(a1, b);
+    }
+}
