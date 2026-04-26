@@ -1,16 +1,31 @@
 use crate::cap;
 use crate::state::{mark_history_dirty, AppState, WatchHandle};
 use crate::transcript;
-use crate::types::{VizGone, VizItem, VizKind, VizStatus, VizUpdated};
+use crate::types::{VizGone, VizItem, VizKind, VizStatus, VizUpdated, WatchStatus};
+use crate::watcher::Watcher;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent};
+use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::unbounded_channel;
+
+/// Watcher impl for a local folder. Drops the underlying notify debouncer when this struct is
+/// dropped, which causes the OS file watcher to detach and the event-drain task's channel to
+/// close, exiting it cleanly.
+struct LocalWatcher {
+    _debouncer: Box<dyn Any + Send + Sync>,
+}
+
+impl Watcher for LocalWatcher {
+    fn status(&self) -> WatchStatus {
+        WatchStatus::Connected
+    }
+}
 
 const DEBOUNCE_MS: u64 = 250;
 const STABLE_RECHECK_MS: u64 = 200;
@@ -51,7 +66,9 @@ pub fn start_watch(
         watch_id.clone(),
         WatchHandle {
             id: watch_id.clone(),
-            _keepalive: Box::new(debouncer),
+            watcher: Box::new(LocalWatcher {
+                _debouncer: Box::new(debouncer),
+            }),
         },
     );
 
@@ -99,9 +116,17 @@ pub fn start_watch(
     Ok(())
 }
 
-pub fn stop_watch(state: &AppState, watch_id: &str) {
+pub fn stop_watch(state: &Arc<AppState>, watch_id: &str) {
     state.watch_handles.lock().remove(watch_id);
-    state.items.lock().retain(|(wid, _), _| wid != watch_id);
+    let removed_any = {
+        let mut items = state.items.lock();
+        let before = items.len();
+        items.retain(|(wid, _), _| wid != watch_id);
+        items.len() != before
+    };
+    if removed_any {
+        mark_history_dirty(state);
+    }
 }
 
 async fn cold_scan(app: &AppHandle, state: &Arc<AppState>, watch_id: &str, root: &Path) {

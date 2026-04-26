@@ -3,13 +3,34 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type {
   InitialState,
+  SshAgentProbe,
+  SshHostEntry,
+  TestResult,
   VizEnriched,
   VizEvicted,
   VizGone,
   VizItem,
   VizUpdated,
   Watch,
+  WatchStatus,
+  WatchStatusEvent,
 } from "../types";
+
+export interface TestSshArgs {
+  host: string;
+  user?: string | null;
+  port?: number | null;
+  remote_path: string;
+  glob: string;
+}
+
+export interface AddRemoteWatchArgs {
+  host: string;
+  user?: string | null;
+  port?: number | null;
+  remote_path: string;
+  glob: string;
+}
 
 export const tauri = {
   getState: () => invoke<InitialState>("get_state"),
@@ -24,6 +45,20 @@ export const tauri = {
   setSelected: (watchId: string | null, absPath: string | null) =>
     invoke<void>("set_selected", { watchId, absPath }),
   clearGallery: () => invoke<void>("clear_gallery"),
+
+  // SSH
+  probeSshAgent: () => invoke<SshAgentProbe>("probe_ssh_agent"),
+  listSshHosts: () => invoke<SshHostEntry[]>("list_ssh_hosts"),
+  testSshConnection: (args: TestSshArgs) =>
+    invoke<TestResult>("test_ssh_connection", { args }),
+  addRemoteWatch: (args: AddRemoteWatchArgs) =>
+    invoke<Watch>("add_remote_watch", { args }),
+  fetchRemoteFile: (watchId: string, absPath: string) =>
+    invoke<string>("fetch_remote_file", { watchId, absPath }),
+  getWatchStatus: (watchId: string) =>
+    invoke<WatchStatus | null>("get_watch_status", { watchId }),
+  reconnectWatch: (watchId: string) =>
+    invoke<void>("reconnect_watch", { watchId }),
 };
 
 export const events = {
@@ -37,6 +72,8 @@ export const events = {
     listen<VizGone>("viz:gone", (e) => cb(e.payload)),
   onVizEvicted: (cb: (e: VizEvicted) => void): Promise<UnlistenFn> =>
     listen<VizEvicted>("viz:evicted", (e) => cb(e.payload)),
+  onWatchStatus: (cb: (e: WatchStatusEvent) => void): Promise<UnlistenFn> =>
+    listen<WatchStatusEvent>("viz:watch_status", (e) => cb(e.payload)),
 };
 
 export { convertFileSrc };

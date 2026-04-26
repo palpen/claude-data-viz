@@ -11,6 +11,12 @@ export type { VizEvicted } from "./types/bindings/VizEvicted";
 export type { WatchSource } from "./types/bindings/WatchSource";
 export type { Watch } from "./types/bindings/Watch";
 export type { InitialState } from "./types/bindings/InitialState";
+export type { WatchStatus } from "./types/bindings/WatchStatus";
+export type { WatchStatusEvent } from "./types/bindings/WatchStatusEvent";
+export type { SshHostEntry } from "./types/bindings/SshHostEntry";
+export type { SshAgentProbe } from "./types/bindings/SshAgentProbe";
+export type { TestResult } from "./types/bindings/TestResult";
+export type { TestStage } from "./types/bindings/TestStage";
 
 export type ItemId = string;
 export const itemId = (watch_id: string, abs_path: string): ItemId =>

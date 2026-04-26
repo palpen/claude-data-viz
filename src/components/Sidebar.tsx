@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useVizStore } from "../store/vizStore";
 import { VizCard } from "./VizCard";
@@ -7,13 +7,25 @@ import { itemId } from "../types";
 export function Sidebar() {
   const order = useVizStore((s) => s.order);
   const items = useVizStore((s) => s.items);
+  const watches = useVizStore((s) => s.watches);
   const selectedId = useVizStore((s) => s.selectedId);
   const select = useVizStore((s) => s.select);
 
   const parentRef = useRef<HTMLDivElement>(null);
 
+  // Defense against stale items orphaned from a removed watch: only show items whose
+  // watch_id is in the active watches list. Backend should already filter, but a buggy
+  // viz-history.json shouldn't bleed ghost rows into the UI.
+  const visibleOrder = useMemo(() => {
+    const activeIds = new Set(watches.map((w) => w.id));
+    return order.filter((id) => {
+      const it = items[id];
+      return it != null && activeIds.has(it.watch_id);
+    });
+  }, [order, items, watches]);
+
   const virtualizer = useVirtualizer({
-    count: order.length,
+    count: visibleOrder.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 76,
     overscan: 6,
@@ -22,10 +34,10 @@ export function Sidebar() {
   return (
     <div className="h-full flex flex-col bg-[color:var(--color-surface)] border-r border-[color:var(--color-border)]">
       <div className="px-3 py-2.5 border-b border-[color:var(--color-border)] text-[11px] uppercase tracking-wider text-[color:var(--color-text-dim)] flex items-center justify-between">
-        <span>Recent ({order.length})</span>
+        <span>Recent ({visibleOrder.length})</span>
       </div>
       <div ref={parentRef} className="flex-1 min-h-0 overflow-auto overscroll-contain">
-        {order.length === 0 ? (
+        {visibleOrder.length === 0 ? (
           <div className="px-3 py-4 text-xs text-[color:var(--color-text-dim)]">
             Waiting for visualizations…
           </div>
@@ -37,7 +49,7 @@ export function Sidebar() {
             }}
           >
             {virtualizer.getVirtualItems().map((vRow) => {
-              const id = order[vRow.index];
+              const id = visibleOrder[vRow.index];
               const item = items[id];
               if (!item) return null;
               const sel = selectedId === id;

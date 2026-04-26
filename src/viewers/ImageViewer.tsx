@@ -7,10 +7,9 @@ import {
 import { tinykeys } from "tinykeys";
 import { FileImage, Maximize2, ZoomIn, ZoomOut } from "lucide-react";
 import { convertFileSrc } from "../lib/tauri";
-import type { VizItem } from "../types";
-import type { ViewerDefinition } from "./registry";
+import type { ViewerDefinition, ViewerProps } from "./registry";
 
-function ImageView({ item }: { item: VizItem }) {
+function ImageView({ item, displayPath }: ViewerProps) {
   const ref = useRef<ReactZoomPanPinchRef | null>(null);
 
   useEffect(() => {
@@ -69,7 +68,7 @@ function ImageView({ item }: { item: VizItem }) {
               contentClass="!w-full !h-full flex items-center justify-center p-4"
             >
               <img
-                src={`${convertFileSrc(item.abs_path)}?v=${item.mtime}`}
+                src={`${convertFileSrc(displayPath)}?v=${item.mtime}`}
                 alt={item.rel_path}
                 className="max-w-full max-h-full object-contain select-none"
                 draggable={false}

@@ -330,7 +330,7 @@ fn scan_active_jsonls() -> Vec<PathBuf> {
     result
 }
 
-fn process_line(index: &SharedIndex, line: &str) {
+pub(crate) fn process_line(index: &SharedIndex, line: &str) {
     let envelope: RawEnvelope = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(_) => return,
@@ -552,7 +552,7 @@ fn tool_mentions_path(tool: &ToolEntry, abs_path: &str) -> bool {
     false
 }
 
-fn enrich_pending_all(app: &AppHandle, state: &Arc<AppState>, index: &SharedIndex) {
+pub(crate) fn enrich_pending_all(app: &AppHandle, state: &Arc<AppState>, index: &SharedIndex) {
     let pending: Vec<(String, String, i64)> = {
         let items = state.items.lock();
         items
