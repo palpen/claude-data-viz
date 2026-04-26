@@ -62,9 +62,10 @@ pub fn add_local_watch(
 
 #[tauri::command]
 pub fn remove_watch(app: AppHandle, state: State<Arc<AppState>>, watch_id: String) {
-    fs_watcher::stop_watch(&state, &watch_id);
+    fs_watcher::stop_watch(state.inner(), &watch_id);
     state.watches.lock().retain(|w| w.id != watch_id);
     persistence::save_prefs(&app, state.inner());
+    persistence::save_history(&app, state.inner());
 }
 
 #[tauri::command]

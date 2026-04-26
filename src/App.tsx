@@ -106,7 +106,7 @@ export default function App() {
   return (
     <div className="h-screen flex flex-col overflow-hidden">
       <TopBar />
-      <div className="flex-1 min-h-0 grid grid-rows-1 grid-cols-[300px_1fr] overflow-hidden">
+      <div className="flex-1 min-h-0 grid grid-rows-1 grid-cols-[300px_minmax(0,1fr)] overflow-hidden">
         <Sidebar />
         <Viewer />
       </div>

@@ -47,11 +47,24 @@ pub fn run() {
                 state.watches.lock().push(w.clone());
             }
 
-            // Hydrate items from viz-history.json. Skip any whose backing file no longer exists,
-            // so deleted-while-app-was-closed images don't ghost-haunt the sidebar. Items keep
-            // their persisted prompts / tool_use_ids so reopening the app restores attribution.
+            // Hydrate items from viz-history.json. Skip any whose backing file no longer exists
+            // (local only — SSH abs_paths are remote). Drop items orphaned from removed watches:
+            // a stale viz-history.json from an earlier session can reference watch_ids no longer
+            // in prefs. Items keep their persisted prompts / tool_use_ids so reopening the app
+            // restores attribution.
             let history = persistence::load_history(&handle);
-            hydrate_items(&state, &history.items);
+            let watch_local_map: std::collections::HashMap<String, bool> = state
+                .watches
+                .lock()
+                .iter()
+                .map(|w| (w.id.clone(), matches!(w.source, WatchSource::Local { .. })))
+                .collect();
+            let dropped = hydrate_items(&state, &history.items, &watch_local_map);
+            // Only rewrite history if we actually filtered something out — otherwise we'd churn
+            // the file on every clean launch.
+            if dropped > 0 {
+                state::mark_history_dirty(&state);
+            }
 
             for w in prefs.watches.into_iter() {
                 match &w.source {
@@ -131,15 +144,29 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn hydrate_items(state: &Arc<AppState>, persisted: &[types::VizItem]) {
+/// Returns the number of persisted items that were dropped (orphaned from a removed watch, or
+/// a local file that no longer exists on disk). Caller uses this to decide whether to rewrite
+/// history.
+fn hydrate_items(
+    state: &Arc<AppState>,
+    persisted: &[types::VizItem],
+    watch_local_map: &std::collections::HashMap<String, bool>,
+) -> usize {
     let mut items = state.items.lock();
+    let mut dropped = 0usize;
     for it in persisted {
-        if !Path::new(&it.abs_path).exists() {
+        let Some(&is_local) = watch_local_map.get(&it.watch_id) else {
+            dropped += 1;
+            continue;
+        };
+        if is_local && !Path::new(&it.abs_path).exists() {
+            dropped += 1;
             continue;
         }
         let key = (it.watch_id.clone(), it.abs_path.clone());
         items.insert(key, it.clone());
     }
+    dropped
 }
 
 async fn restart_ssh_watch(

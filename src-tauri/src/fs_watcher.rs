@@ -116,9 +116,17 @@ pub fn start_watch(
     Ok(())
 }
 
-pub fn stop_watch(state: &AppState, watch_id: &str) {
+pub fn stop_watch(state: &Arc<AppState>, watch_id: &str) {
     state.watch_handles.lock().remove(watch_id);
-    state.items.lock().retain(|(wid, _), _| wid != watch_id);
+    let removed_any = {
+        let mut items = state.items.lock();
+        let before = items.len();
+        items.retain(|(wid, _), _| wid != watch_id);
+        items.len() != before
+    };
+    if removed_any {
+        mark_history_dirty(state);
+    }
 }
 
 async fn cold_scan(app: &AppHandle, state: &Arc<AppState>, watch_id: &str, root: &Path) {
