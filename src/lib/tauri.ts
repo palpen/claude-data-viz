@@ -40,6 +40,8 @@ export const tauri = {
     }),
   removeWatch: (watchId: string) =>
     invoke<void>("remove_watch", { watchId }),
+  rescanWatch: (watchId: string) =>
+    invoke<void>("rescan_watch", { watchId }),
   setFollowLatest: (value: boolean) =>
     invoke<void>("set_follow_latest", { value }),
   setSelected: (watchId: string | null, absPath: string | null) =>

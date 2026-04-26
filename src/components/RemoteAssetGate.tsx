@@ -43,6 +43,39 @@ export function invalidateRemoteAsset(watchId: string, absPath: string): void {
   cache.delete(cacheKey(watchId, absPath));
 }
 
+/// Read the cached local path for a remote asset, kicking off a fetch on miss. Returns null
+/// while pending or on error — caller decides the fallback (e.g., icon for thumbnails).
+/// Pass `enabled=false` for non-SSH items so the hook is a no-op.
+export function useRemoteAsset(
+  watchId: string,
+  absPath: string,
+  enabled: boolean,
+): string | null {
+  const [, setTick] = useState(0);
+
+  if (!enabled) return null;
+
+  const key = cacheKey(watchId, absPath);
+  const entry = cache.get(key);
+
+  if (!entry) {
+    startFetch(watchId, absPath).then(
+      () => setTick((n) => n + 1),
+      () => setTick((n) => n + 1),
+    );
+    return null;
+  }
+  if (entry.kind === "resolved") return entry.localPath;
+  if (entry.kind === "pending") {
+    entry.promise.then(
+      () => setTick((n) => n + 1),
+      () => setTick((n) => n + 1),
+    );
+    return null;
+  }
+  return null;
+}
+
 export interface RemoteAssetGateProps {
   watchId: string;
   absPath: string;

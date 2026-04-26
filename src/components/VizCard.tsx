@@ -2,8 +2,10 @@ import { clsx } from "clsx";
 import { formatDistanceToNow } from "date-fns";
 import { MessageSquare } from "lucide-react";
 import { convertFileSrc } from "../lib/tauri";
+import { useVizStore } from "../store/vizStore";
 import type { VizItem } from "../types";
 import { iconForKind, labelForKind, rendersInlineImagePreview } from "../viewers";
+import { useRemoteAsset } from "./RemoteAssetGate";
 
 function basename(p: string): string {
   const parts = p.split("/");
@@ -22,6 +24,19 @@ export function VizCard({
   const Icon = iconForKind(item.kind);
   const isImage = rendersInlineImagePreview(item.kind);
   const isDeleted = item.status === "deleted";
+  const isRemote = useVizStore((s) =>
+    s.watches.find((w) => w.id === item.watch_id)?.source.kind === "ssh",
+  );
+  // For SSH items we can't read abs_path directly — route through the fetch cache. Cache miss
+  // returns null; we fall back to the kind icon until the fetch completes.
+  const remoteLocalPath = useRemoteAsset(item.watch_id, item.abs_path, isRemote && isImage);
+  const thumbSrc = isImage
+    ? isRemote
+      ? remoteLocalPath
+        ? `${convertFileSrc(remoteLocalPath)}?v=${item.mtime}`
+        : null
+      : `${convertFileSrc(item.abs_path)}?v=${item.mtime}`
+    : null;
 
   return (
     <button
@@ -35,9 +50,9 @@ export function VizCard({
       )}
     >
       <div className="w-12 h-12 flex-shrink-0 rounded bg-[color:var(--color-surface-2)] border border-[color:var(--color-border)] overflow-hidden flex items-center justify-center">
-        {isImage ? (
+        {thumbSrc ? (
           <img
-            src={`${convertFileSrc(item.abs_path)}?v=${item.mtime}`}
+            src={thumbSrc}
             alt=""
             className="w-full h-full object-cover"
             loading="lazy"

@@ -8,21 +8,23 @@ export function Sidebar() {
   const order = useVizStore((s) => s.order);
   const items = useVizStore((s) => s.items);
   const watches = useVizStore((s) => s.watches);
+  const activeWatchId = useVizStore((s) => s.activeWatchId);
   const selectedId = useVizStore((s) => s.selectedId);
   const select = useVizStore((s) => s.select);
 
   const parentRef = useRef<HTMLDivElement>(null);
 
-  // Defense against stale items orphaned from a removed watch: only show items whose
-  // watch_id is in the active watches list. Backend should already filter, but a buggy
-  // viz-history.json shouldn't bleed ghost rows into the UI.
+  // Filter to (a) items whose watch_id is in the active watches list (defense against orphans
+  // from a removed watch) and (b) the focused tab if the user selected one.
   const visibleOrder = useMemo(() => {
     const activeIds = new Set(watches.map((w) => w.id));
     return order.filter((id) => {
       const it = items[id];
-      return it != null && activeIds.has(it.watch_id);
+      if (it == null || !activeIds.has(it.watch_id)) return false;
+      if (activeWatchId && it.watch_id !== activeWatchId) return false;
+      return true;
     });
-  }, [order, items, watches]);
+  }, [order, items, watches, activeWatchId]);
 
   const virtualizer = useVirtualizer({
     count: visibleOrder.length,
