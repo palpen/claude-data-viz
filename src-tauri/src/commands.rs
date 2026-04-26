@@ -760,6 +760,8 @@ pub async fn list_remote_dirs(
     state: State<'_, Arc<AppState>>,
     watch_id: String,
     path: Option<String>,
+    cursor: Option<String>,
+    limit: Option<usize>,
 ) -> Result<RemoteDirListing, String> {
     let source = state
         .watches
@@ -830,13 +832,14 @@ pub async fn list_remote_dirs(
     dirs.sort();
 
     let parent = parent_path(&canonical);
-    Ok(RemoteDirListing {
-        current: canonical,
+    Ok(ssh::dir_paginate::paginate_dir_listing(
+        &canonical,
         parent,
-        entries: dirs,
-        next_cursor: None,
-        total_estimate: None,
-    })
+        dirs,
+        cursor,
+        limit.unwrap_or(0),
+        None,
+    ))
 }
 
 fn parent_path(p: &str) -> Option<String> {

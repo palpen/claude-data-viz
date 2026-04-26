@@ -15,14 +15,60 @@ const MAX_PAGE_SIZE: usize = 1000;
 /// `MAX_PAGE_SIZE` are clamped. The returned `next_cursor` is the last entry on the page
 /// when more remain, otherwise `None`.
 pub fn paginate_dir_listing(
-    _path: &str,
-    _parent: Option<String>,
-    _entries: Vec<String>,
-    _cursor: Option<String>,
-    _limit: usize,
-    _total_estimate: Option<u64>,
+    path: &str,
+    parent: Option<String>,
+    mut entries: Vec<String>,
+    cursor: Option<String>,
+    limit: usize,
+    total_estimate: Option<u64>,
 ) -> RemoteDirListing {
-    unimplemented!("paginate_dir_listing — implementation lands in the next commit")
+    // Stable sort by case-insensitive key — Vec::sort_by_key preserves input order on ties,
+    // so "alpha" stays before "ALPHA" if that's how the SFTP listing returned them.
+    entries.sort_by_key(|e| e.to_ascii_lowercase());
+
+    let start = match &cursor {
+        None => 0,
+        Some(c) => {
+            let lc = c.to_ascii_lowercase();
+            // Find the rightmost entry whose lowercase form is <= cursor's lowercase, *and*
+            // — when lowercase ties — whose exact bytes match. The next page begins one slot
+            // past that index. If the cursor isn't found exactly, partition_point lands at
+            // the first entry that sorts strictly after it, which is also the right answer.
+            entries
+                .iter()
+                .rposition(|e| e == c)
+                .map(|i| i + 1)
+                .unwrap_or_else(|| {
+                    entries.partition_point(|e| e.to_ascii_lowercase() <= lc)
+                })
+        }
+    };
+
+    let lim = if limit == 0 {
+        DEFAULT_PAGE_SIZE
+    } else {
+        limit.min(MAX_PAGE_SIZE)
+    };
+
+    let page: Vec<String> = if start >= entries.len() {
+        Vec::new()
+    } else {
+        let end = (start + lim).min(entries.len());
+        entries[start..end].to_vec()
+    };
+    let next_cursor = if start + page.len() < entries.len() {
+        page.last().cloned()
+    } else {
+        None
+    };
+
+    RemoteDirListing {
+        current: path.to_string(),
+        parent,
+        entries: page,
+        next_cursor,
+        total_estimate,
+    }
 }
 
 #[cfg(test)]
