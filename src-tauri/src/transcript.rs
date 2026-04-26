@@ -636,7 +636,9 @@ pub(crate) fn enrich_pending_all(app: &AppHandle, state: &Arc<AppState>, index: 
             continue;
         }
         any_enriched = true;
-        let _ = app.emit(
+        let abs_path_for_log = abs_path.clone();
+        let watch_id_for_log = watch_id.clone();
+        if let Err(err) = app.emit(
             "viz:enriched",
             VizEnriched {
                 watch_id,
@@ -646,7 +648,9 @@ pub(crate) fn enrich_pending_all(app: &AppHandle, state: &Arc<AppState>, index: 
                 session_id: hit.session_id,
                 cwd: hit.cwd,
             },
-        );
+        ) {
+            tracing::warn!(?err, watch_id = %watch_id_for_log, abs_path = %abs_path_for_log, "transcript: emit viz:enriched failed (batch)");
+        }
     }
     if any_enriched {
         mark_history_dirty(state);
@@ -681,7 +685,7 @@ pub fn try_enrich_now(
     if mutated {
         mark_history_dirty(state);
     }
-    let _ = app.emit(
+    if let Err(err) = app.emit(
         "viz:enriched",
         VizEnriched {
             watch_id: watch_id.to_string(),
@@ -691,7 +695,9 @@ pub fn try_enrich_now(
             session_id: hit.session_id,
             cwd: hit.cwd,
         },
-    );
+    ) {
+        tracing::warn!(?err, %watch_id, %abs_path, "transcript: emit viz:enriched failed (try_enrich_now)");
+    }
 }
 
 fn parse_iso8601_ms(s: &str) -> Option<i64> {

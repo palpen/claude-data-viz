@@ -712,7 +712,7 @@ pub async fn fetch_remote_file(
         )
         .await
         {
-            eprintln!("ssh: html sibling fetch failed: {e}");
+            tracing::warn!(err = %e, %abs_path, "commands: html sibling fetch failed");
         }
     }
 
@@ -870,13 +870,16 @@ pub async fn update_remote_watch_path(
     if !stale_paths.is_empty() {
         mark_history_dirty(state.inner());
         for p in stale_paths {
-            let _ = app.emit(
+            let abs_path_for_log = p.clone();
+            if let Err(err) = app.emit(
                 "viz:gone",
                 VizGone {
                     watch_id: watch_id.clone(),
                     abs_path: p,
                 },
-            );
+            ) {
+                tracing::warn!(?err, %watch_id, abs_path = %abs_path_for_log, "commands: emit viz:gone failed during update_remote_watch_path");
+            }
         }
     }
 

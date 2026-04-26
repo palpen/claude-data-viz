@@ -93,7 +93,7 @@ pub fn run() {
                             w.id.clone(),
                             root,
                         ) {
-                            eprintln!("warn: restart local watch {} failed: {}", w.id, e);
+                            tracing::warn!(err = %e, watch_id = %w.id, "lib: restart local watch failed");
                         }
                     }
                     WatchSource::Ssh {
@@ -126,7 +126,7 @@ pub fn run() {
                             )
                             .await
                             {
-                                eprintln!("warn: restart ssh watch {} failed: {}", watch_id, e);
+                                tracing::warn!(err = %e, %watch_id, "lib: restart ssh watch failed");
                             }
                         });
                     }

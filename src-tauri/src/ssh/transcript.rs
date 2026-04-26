@@ -35,7 +35,7 @@ pub fn start_poller(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(e) = run(conn, app, state).await {
-            eprintln!("ssh transcript poller exited: {e}");
+            tracing::warn!(err = %e, "ssh_transcript: poller exited with error");
         }
     })
 }
@@ -57,7 +57,7 @@ async fn run(conn: Arc<RemoteConnection>, app: AppHandle, state: Arc<AppState>) 
         let sftp = match conn.open_sftp().await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("ssh transcript: open_sftp failed: {e}");
+                tracing::warn!(err = %e, "ssh_transcript: open_sftp failed");
                 continue;
             }
         };
@@ -112,7 +112,7 @@ async fn run(conn: Arc<RemoteConnection>, app: AppHandle, state: Arc<AppState>) 
                     }
                 }
                 Err(e) => {
-                    eprintln!("ssh transcript: read_delta {} failed: {e}", path.display());
+                    tracing::warn!(err = %e, path = %path.display(), "ssh_transcript: read_delta failed");
                 }
             }
         }

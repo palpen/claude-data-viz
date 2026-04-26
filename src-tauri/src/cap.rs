@@ -34,12 +34,16 @@ pub fn enforce_item_cap(app: &AppHandle, state: &Arc<AppState>) {
         mark_history_dirty(state);
     }
     for (watch_id, abs_path) in evicted {
-        let _ = app.emit(
+        let watch_id_for_log = watch_id.clone();
+        let abs_path_for_log = abs_path.clone();
+        if let Err(err) = app.emit(
             "viz:evicted",
             VizEvicted {
                 watch_id,
                 abs_path,
             },
-        );
+        ) {
+            tracing::warn!(?err, watch_id = %watch_id_for_log, abs_path = %abs_path_for_log, "cap: emit viz:evicted failed");
+        }
     }
 }

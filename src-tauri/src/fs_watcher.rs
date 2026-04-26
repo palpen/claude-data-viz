@@ -45,7 +45,7 @@ pub fn start_watch(
         .asset_protocol_scope()
         .allow_directory(&root, true)
     {
-        eprintln!("warn: failed to extend asset protocol scope: {e}");
+        tracing::warn!(err = %e, root = %root.display(), "fs_watcher: failed to extend asset protocol scope");
     }
 
     let (tx, mut rx) = unbounded_channel::<DebounceEventResult>();
@@ -105,7 +105,7 @@ pub fn start_watch(
                     }
                     Err(errors) => {
                         for err in errors {
-                            eprintln!("notify error: {err}");
+                            tracing::warn!(?err, "fs_watcher: notify error");
                         }
                     }
                 }
@@ -175,7 +175,9 @@ pub async fn cold_scan(app: &AppHandle, state: &Arc<AppState>, watch_id: &str, r
         let is_new = !was_present;
         if is_new {
             any_new = true;
-            let _ = app.emit("viz:new", &merged);
+            if let Err(err) = app.emit("viz:new", &merged) {
+                tracing::warn!(?err, abs_path = %merged.abs_path, "fs_watcher: emit viz:new failed (cold scan)");
+            }
             transcript::try_enrich_now(
                 app,
                 state,
@@ -265,7 +267,7 @@ async fn process_event(
             let key = (watch_id.to_string(), fresh.abs_path.clone());
             let (merged, was_present) = upsert_preserving_enrichment(state, key, fresh);
             if was_present {
-                let _ = app.emit(
+                if let Err(err) = app.emit(
                     "viz:updated",
                     VizUpdated {
                         watch_id: watch_id.to_string(),
@@ -273,9 +275,11 @@ async fn process_event(
                         mtime: merged.mtime,
                         size: merged.size,
                     },
-                );
-            } else {
-                let _ = app.emit("viz:new", &merged);
+                ) {
+                    tracing::warn!(?err, abs_path = %merged.abs_path, "fs_watcher: emit viz:updated failed");
+                }
+            } else if let Err(err) = app.emit("viz:new", &merged) {
+                tracing::warn!(?err, abs_path = %merged.abs_path, "fs_watcher: emit viz:new failed");
             }
             transcript::try_enrich_now(
                 app,
@@ -300,13 +304,16 @@ async fn handle_remove(app: &AppHandle, state: &Arc<AppState>, watch_id: &str, p
     let removed = state.items.lock().remove(&key).is_some();
     if removed {
         mark_history_dirty(state);
-        let _ = app.emit(
+        let abs_path = path.to_string_lossy().into_owned();
+        if let Err(err) = app.emit(
             "viz:gone",
             VizGone {
                 watch_id: watch_id.to_string(),
-                abs_path: path.to_string_lossy().into_owned(),
+                abs_path: abs_path.clone(),
             },
-        );
+        ) {
+            tracing::warn!(?err, %abs_path, "fs_watcher: emit viz:gone failed");
+        }
     }
 }
 
