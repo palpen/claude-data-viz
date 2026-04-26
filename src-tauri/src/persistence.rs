@@ -1,9 +1,11 @@
 use crate::state::AppState;
-use crate::types::{VizItem, Watch};
+use crate::types::{RecentRemote, VizItem, Watch};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
+
+const RECENT_REMOTES_CAP: usize = 10;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PersistedPrefs {
@@ -13,6 +15,8 @@ pub struct PersistedPrefs {
     pub follow_latest: bool,
     #[serde(default)]
     pub selected: Option<(String, String)>,
+    #[serde(default)]
+    pub recent_remotes: Vec<RecentRemote>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -95,8 +99,26 @@ pub fn save_prefs(app: &AppHandle, state: &Arc<AppState>) {
         watches: state.watches.lock().clone(),
         follow_latest: *state.follow_latest.lock(),
         selected: state.selected_id.lock().clone(),
+        recent_remotes: state.recent_remotes.lock().clone(),
     };
     write_json(&path, &snap);
+}
+
+/// Insert a remote into the recents list — most-recent-first, dedup by (host, user, port,
+/// remote_path), capped at `RECENT_REMOTES_CAP`. If the same tuple is already present we just
+/// bump its `last_used_ms`. Caller should call `save_prefs` afterwards.
+pub fn record_recent_remote(state: &Arc<AppState>, recent: RecentRemote) {
+    let mut list = state.recent_remotes.lock();
+    list.retain(|r| {
+        !(r.host == recent.host
+            && r.user == recent.user
+            && r.port == recent.port
+            && r.remote_path == recent.remote_path)
+    });
+    list.insert(0, recent);
+    if list.len() > RECENT_REMOTES_CAP {
+        list.truncate(RECENT_REMOTES_CAP);
+    }
 }
 
 pub fn save_history(app: &AppHandle, state: &Arc<AppState>) {

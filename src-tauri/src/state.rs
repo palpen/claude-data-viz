@@ -1,7 +1,7 @@
 use crate::ssh::cache::FetchLocks;
 use crate::ssh::RemoteConnections;
 use crate::transcript::{self, SharedIndex};
-use crate::types::{VizItem, Watch};
+use crate::types::{RecentRemote, VizItem, Watch};
 use crate::watcher::Watcher;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -29,6 +29,9 @@ pub struct AppState {
     /// Set whenever the items map mutates; consumed by a periodic background task that flushes
     /// viz-history.json. Cheap atomic so callers don't pay disk I/O on the hot path.
     pub history_dirty: AtomicBool,
+    /// Most-recent-first list of past remote connections, persisted via prefs.json. Used to
+    /// pre-fill the connect dialog so users don't keep retyping the same host/path.
+    pub recent_remotes: Mutex<Vec<RecentRemote>>,
 }
 
 pub struct WatchHandle {
@@ -51,6 +54,7 @@ impl AppState {
             remote_connections: RemoteConnections::new(),
             fetch_locks: FetchLocks::default(),
             history_dirty: AtomicBool::new(false),
+            recent_remotes: Mutex::new(Vec::new()),
         })
     }
 }

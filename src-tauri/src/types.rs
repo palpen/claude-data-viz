@@ -191,3 +191,25 @@ pub struct InitialState {
     pub selected: Option<(String, String)>,
 }
 
+/// One past remote connection. The dedup key is the full tuple — same host, different paths
+/// stay as separate chips because users routinely watch multiple folders on one box.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub struct RecentRemote {
+    pub host: String,
+    pub user: String,
+    pub port: u16,
+    pub remote_path: String,
+    pub glob: String,
+    #[ts(type = "number")]
+    pub last_used_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub struct RemoteDirListing {
+    pub current: String,
+    pub parent: Option<String>,
+    pub dirs: Vec<String>,
+}
+

@@ -3,6 +3,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type {
   InitialState,
+  RecentRemote,
+  RemoteDirListing,
   SshAgentProbe,
   SshHostEntry,
   TestResult,
@@ -20,7 +22,8 @@ export interface TestSshArgs {
   host: string;
   user?: string | null;
   port?: number | null;
-  remote_path: string;
+  /** Empty / null → resolve to the user's home directory on the remote. */
+  remote_path?: string | null;
   glob: string;
 }
 
@@ -28,7 +31,8 @@ export interface AddRemoteWatchArgs {
   host: string;
   user?: string | null;
   port?: number | null;
-  remote_path: string;
+  /** Empty / null → resolve to the user's home directory on the remote. */
+  remote_path?: string | null;
   glob: string;
 }
 
@@ -61,6 +65,13 @@ export const tauri = {
     invoke<WatchStatus | null>("get_watch_status", { watchId }),
   reconnectWatch: (watchId: string) =>
     invoke<void>("reconnect_watch", { watchId }),
+  listRecentRemotes: () => invoke<RecentRemote[]>("list_recent_remotes"),
+  forgetRecentRemote: (host: string, user: string, port: number, remotePath: string) =>
+    invoke<void>("forget_recent_remote", { host, user, port, remotePath }),
+  updateRemoteWatchPath: (watchId: string, newPath: string | null) =>
+    invoke<Watch>("update_remote_watch_path", { watchId, newPath }),
+  listRemoteDirs: (watchId: string, path: string | null) =>
+    invoke<RemoteDirListing>("list_remote_dirs", { watchId, path }),
 };
 
 export const events = {
