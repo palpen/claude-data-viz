@@ -210,6 +210,9 @@ pub struct RecentRemote {
 pub struct RemoteDirListing {
     pub current: String,
     pub parent: Option<String>,
-    pub dirs: Vec<String>,
+    pub entries: Vec<String>,
+    pub next_cursor: Option<String>,
+    #[ts(type = "number | null")]
+    pub total_estimate: Option<u64>,
 }
 

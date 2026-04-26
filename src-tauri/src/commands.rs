@@ -833,7 +833,9 @@ pub async fn list_remote_dirs(
     Ok(RemoteDirListing {
         current: canonical,
         parent,
-        dirs,
+        entries: dirs,
+        next_cursor: None,
+        total_estimate: None,
     })
 }
 
