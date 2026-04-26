@@ -167,11 +167,41 @@ pub struct TestStage {
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "../../src/types/bindings/")]
+pub struct UnknownHostInfo {
+    pub host: String,
+    pub port: u16,
+    /// SHA256:<base64> form, ready to display.
+    pub fingerprint: String,
+    /// e.g. "ssh-ed25519", "ecdsa-sha2-nistp256".
+    pub key_type: String,
+    /// The full OpenSSH-formatted public key line ("<algo> <base64> [comment]").
+    pub raw_openssh: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub struct HostKeyChangedInfo {
+    pub host: String,
+    pub port: u16,
+    pub fingerprint_offered: String,
+    pub fingerprint_known: String,
+    /// 1-indexed line number in the known_hosts file where the conflict was found.
+    #[ts(type = "number")]
+    pub known_hosts_line: u64,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/bindings/")]
 pub struct TestResult {
     pub reachable: TestStage,
     pub authenticated: TestStage,
     pub path_exists: TestStage,
     pub matched: TestStage,
+    /// Set when the host key isn't in known_hosts. Frontend should prompt the user to trust.
+    pub unknown_host: Option<UnknownHostInfo>,
+    /// Set when known_hosts already has a different (or revoked) key for this host. The
+    /// frontend should NOT offer a trust path — only `ssh-keygen -R` advice.
+    pub host_key_changed: Option<HostKeyChangedInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
