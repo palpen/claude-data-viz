@@ -70,8 +70,18 @@ export const tauri = {
     invoke<void>("forget_recent_remote", { host, user, port, remotePath }),
   updateRemoteWatchPath: (watchId: string, newPath: string | null) =>
     invoke<Watch>("update_remote_watch_path", { watchId, newPath }),
-  listRemoteDirs: (watchId: string, path: string | null) =>
-    invoke<RemoteDirListing>("list_remote_dirs", { watchId, path }),
+  listRemoteDirs: (
+    watchId: string,
+    path: string | null,
+    cursor?: string | null,
+    limit?: number | null,
+  ) =>
+    invoke<RemoteDirListing>("list_remote_dirs", {
+      watchId,
+      path,
+      cursor: cursor ?? null,
+      limit: limit ?? null,
+    }),
 };
 
 export const events = {
