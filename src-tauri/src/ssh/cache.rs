@@ -94,18 +94,24 @@ pub async fn fetch_file(
     let _guard = lock.lock().await;
 
     if cache_hit(&local, remote_mtime_ms, remote_size) {
-        let _ = touch_atime(&local);
+        if let Err(e) = touch_atime(&local) {
+            tracing::warn!(err = %e, path = %local.display(), "ssh_cache: touch_atime failed (cache hit)");
+        }
         return Ok(local);
     }
 
     let sftp = conn.open_sftp().await?;
     download_atomic(&sftp, remote_path, &local).await?;
     set_local_mtime(&local, remote_mtime_ms);
-    let _ = touch_atime(&local);
+    if let Err(e) = touch_atime(&local) {
+        tracing::warn!(err = %e, path = %local.display(), "ssh_cache: touch_atime failed (post-download)");
+    }
 
     // Eviction is best-effort and non-fatal.
     if let Some(root) = local.parent().and_then(|p| p.parent()) {
-        let _ = enforce_cap(root, TOTAL_CAP_BYTES);
+        if let Err(e) = enforce_cap(root, TOTAL_CAP_BYTES) {
+            tracing::warn!(err = %e, root = %root.display(), "ssh_cache: enforce_cap failed");
+        }
     }
     Ok(local)
 }
@@ -173,7 +179,7 @@ pub async fn fetch_html_siblings(
                 bytes += size;
             }
             Err(e) => {
-                eprintln!("ssh: sibling fetch {remote_path} failed: {e}");
+                tracing::warn!(err = %e, %remote_path, "ssh_cache: sibling fetch failed");
             }
         }
     }

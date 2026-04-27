@@ -25,6 +25,19 @@ const HISTORY_FLUSH_INTERVAL_MS: u64 = 500;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Idempotent + non-fatal: a Result-returning init means double-calls (e.g. from a future
+    // integration test that exercises run()) won't panic, and a subscriber failure won't kill
+    // the app. RUST_LOG overrides the default. Default keeps our crate at info, everything else
+    // at warn — quiet by default, but our own warnings are visible.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
+                .unwrap_or_else(|_| "claude_data_viz=info,warn".into()),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+    tracing::info!("claude-data-viz starting");
+
     let app_state = AppState::new();
 
     let builder = tauri::Builder::default()
@@ -80,7 +93,7 @@ pub fn run() {
                             w.id.clone(),
                             root,
                         ) {
-                            eprintln!("warn: restart local watch {} failed: {}", w.id, e);
+                            tracing::warn!(err = %e, watch_id = %w.id, "lib: restart local watch failed");
                         }
                     }
                     WatchSource::Ssh {
@@ -113,7 +126,7 @@ pub fn run() {
                             )
                             .await
                             {
-                                eprintln!("warn: restart ssh watch {} failed: {}", watch_id, e);
+                                tracing::warn!(err = %e, %watch_id, "lib: restart ssh watch failed");
                             }
                         });
                     }

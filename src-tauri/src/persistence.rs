@@ -32,7 +32,7 @@ fn default_follow() -> bool {
 fn data_dir(app: &AppHandle) -> Option<PathBuf> {
     let dir = app.path().app_data_dir().ok()?;
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("warn: failed to create app data dir: {e}");
+        tracing::warn!(err = %e, dir = %dir.display(), "persistence: failed to create app data dir");
         return None;
     }
     Some(dir)
@@ -134,17 +134,17 @@ fn write_json<T: Serialize>(path: &Path, value: &T) {
     let bytes = match serde_json::to_vec_pretty(value) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("warn: serialize {} failed: {e}", path.display());
+            tracing::warn!(err = %e, path = %path.display(), "persistence: serialize failed");
             return;
         }
     };
     // Atomic write: write to .tmp, then rename. Avoids torn reads on crash.
     let tmp = path.with_extension("tmp");
     if let Err(e) = std::fs::write(&tmp, &bytes) {
-        eprintln!("warn: write {} failed: {e}", tmp.display());
+        tracing::warn!(err = %e, tmp = %tmp.display(), "persistence: write tmp failed");
         return;
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
-        eprintln!("warn: rename {} -> {} failed: {e}", tmp.display(), path.display());
+        tracing::warn!(err = %e, tmp = %tmp.display(), path = %path.display(), "persistence: rename tmp -> final failed");
     }
 }

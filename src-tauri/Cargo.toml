@@ -42,9 +42,12 @@ filetime = "0.2"
 hmac = "0.12"
 sha1 = "0.10"
 data-encoding = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"
+tracing-test = "0.2"
 
 [profile.release]
 panic = "abort"

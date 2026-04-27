@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { tauri } from "../lib/tauri";
+import { swallowWithLog } from "../lib/log";
 import { useVizStore } from "../store/vizStore";
 import type {
   HostKeyChangedInfo,
@@ -69,7 +70,9 @@ export function ConnectRemoteDialog({ onClose }: Props) {
 
   const onForgetRecent = async (r: RecentRemote, e: React.MouseEvent) => {
     e.stopPropagation();
-    await tauri.forgetRecentRemote(r.host, r.user, r.port, r.remote_path).catch(() => {});
+    await tauri
+      .forgetRecentRemote(r.host, r.user, r.port, r.remote_path)
+      .catch(swallowWithLog("ConnectRemoteDialog: forgetRecentRemote"));
     setRecents((prev) =>
       prev.filter(
         (x) =>

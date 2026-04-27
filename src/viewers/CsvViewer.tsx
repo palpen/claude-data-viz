@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Sheet } from "lucide-react";
 import { convertFileSrc } from "../lib/tauri";
+import { swallowWithLog } from "../lib/log";
 import type { ViewerDefinition, ViewerProps } from "./registry";
 import { DataTable } from "./data/DataTable";
 import type { Column, Dataset } from "./data/types";
@@ -141,7 +142,7 @@ async function readPreviewText(
       chunks.push(decoder.decode(value, { stream: true }));
     }
   } finally {
-    reader.cancel().catch(() => {});
+    reader.cancel().catch(swallowWithLog("CsvViewer: stream reader.cancel"));
   }
 
   let text = chunks.join("") + decoder.decode();

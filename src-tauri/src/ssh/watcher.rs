@@ -109,7 +109,7 @@ pub fn start(
     // Extend the asset protocol scope once, at watch start, to cover this watch's cache dir.
     if let Ok(cache_dir) = cache::cache_root(&app, &watch_id) {
         if let Err(e) = app.asset_protocol_scope().allow_directory(&cache_dir, true) {
-            eprintln!("warn: extending asset scope for {} failed: {e}", cache_dir.display());
+            tracing::warn!(err = %e, cache_dir = %cache_dir.display(), "ssh_watcher: failed to extend asset protocol scope");
         }
     }
 
@@ -173,6 +173,7 @@ async fn run_loop(
         let sftp = match conn.open_sftp().await {
             Ok(s) => s,
             Err(e) => {
+                tracing::warn!(err = %e, %watch_id, "ssh_watcher: open_sftp failed; entering Reconnecting");
                 set_status_and_maybe_emit(
                     &app,
                     &status,
@@ -192,6 +193,7 @@ async fn run_loop(
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("No such file") || msg.contains("not found") {
+                    tracing::warn!(err = %msg, %watch_id, %remote_path, "ssh_watcher: remote path invalid; stopping poll");
                     set_status_and_maybe_emit(
                         &app,
                         &status,
@@ -200,6 +202,7 @@ async fn run_loop(
                     );
                     return; // Stop polling — config is bad. User must edit watch.
                 }
+                tracing::warn!(err = %msg, %watch_id, %remote_path, "ssh_watcher: scan failed; entering Reconnecting");
                 set_status_and_maybe_emit(
                     &app,
                     &status,
@@ -375,7 +378,7 @@ async fn reconcile(
                     };
                     tracked.insert(entry.abs_path.clone(), now_track);
                     if track.emitted {
-                        let _ = app.emit(
+                        if let Err(err) = app.emit(
                             "viz:updated",
                             VizUpdated {
                                 watch_id: watch_id.to_string(),
@@ -383,7 +386,9 @@ async fn reconcile(
                                 mtime: entry.mtime_ms,
                                 size: entry.size,
                             },
-                        );
+                        ) {
+                            tracing::warn!(?err, abs_path = %entry.abs_path, "ssh_watcher: emit viz:updated failed");
+                        }
                         if let Some(item) = state
                             .items
                             .lock()
@@ -412,13 +417,16 @@ async fn reconcile(
         let removed_ok = state.items.lock().remove(&key).is_some();
         if removed_ok {
             mark_history_dirty(state);
-            let _ = app.emit(
+            let abs_path = path.clone();
+            if let Err(err) = app.emit(
                 "viz:gone",
                 VizGone {
                     watch_id: watch_id.to_string(),
                     abs_path: path,
                 },
-            );
+            ) {
+                tracing::warn!(?err, %abs_path, "ssh_watcher: emit viz:gone failed");
+            }
             any_change = true;
         }
     }
@@ -469,7 +477,9 @@ async fn emit_new(
     };
     state.items.lock().insert(key, merged.clone());
     mark_history_dirty(state);
-    let _ = app.emit("viz:new", &merged);
+    if let Err(err) = app.emit("viz:new", &merged) {
+        tracing::warn!(?err, abs_path = %merged.abs_path, "ssh_watcher: emit viz:new failed");
+    }
 
     transcript::try_enrich_now(
         app,
@@ -503,13 +513,15 @@ fn set_status_and_maybe_emit(
     *cur = next;
     drop(cur);
     if let Some(payload) = to_emit {
-        let _ = app.emit(
+        if let Err(err) = app.emit(
             "viz:watch_status",
             WatchStatusEvent {
                 watch_id: watch_id.to_string(),
                 status: payload,
             },
-        );
+        ) {
+            tracing::warn!(?err, %watch_id, "ssh_watcher: emit viz:watch_status failed");
+        }
     }
 }
 
