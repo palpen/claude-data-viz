@@ -1,13 +1,26 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Check, Clock, Loader2, Server, X, KeyRound, ChevronDown } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  Clock,
+  KeyRound,
+  Loader2,
+  Server,
+  ShieldAlert,
+  ShieldCheck,
+  X,
+} from "lucide-react";
 import { tauri } from "../lib/tauri";
 import { useVizStore } from "../store/vizStore";
 import type {
+  HostKeyChangedInfo,
   RecentRemote,
   SshAgentProbe,
   SshHostEntry,
   TestResult,
   TestStage,
+  UnknownHostInfo,
 } from "../types";
 
 const DEFAULT_GLOB = "**/*.{png,jpg,jpeg,webp,gif,svg,html,pdf,csv}";
@@ -33,6 +46,7 @@ export function ConnectRemoteDialog({ onClose }: Props) {
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [topErr, setTopErr] = useState<string | null>(null);
+  const [trusting, setTrusting] = useState(false);
 
   useEffect(() => {
     tauri.probeSshAgent().then(setAgent).catch(() =>
@@ -101,6 +115,20 @@ export function ConnectRemoteDialog({ onClose }: Props) {
     }
   };
 
+  const onTrustUnknown = async (info: UnknownHostInfo) => {
+    setTopErr(null);
+    setTrusting(true);
+    try {
+      await tauri.confirmUnknownHost(info.host, info.port, info.fingerprint);
+      // Re-run the test so the user immediately sees auth/path/match stages succeed.
+      await onTest();
+    } catch (e) {
+      setTopErr(String(e));
+    } finally {
+      setTrusting(false);
+    }
+  };
+
   const onConnect = async () => {
     setTopErr(null);
     setBusy(true);
@@ -122,9 +150,17 @@ export function ConnectRemoteDialog({ onClose }: Props) {
     }
   };
 
-  const canTest = !!(host || selectedAlias) && !!glob && !testing;
+  const hasUnresolvedHostKeyIssue = !!(
+    testResult?.unknown_host || testResult?.host_key_changed
+  );
+  const canTest = !!(host || selectedAlias) && !!glob && !testing && !trusting;
   const canConnect =
-    !!(host || selectedAlias) && !!glob && !busy && (agent?.available ?? false);
+    !!(host || selectedAlias) &&
+    !!glob &&
+    !busy &&
+    !trusting &&
+    !hasUnresolvedHostKeyIssue &&
+    (agent?.available ?? false);
 
   return (
     <div
@@ -230,6 +266,19 @@ export function ConnectRemoteDialog({ onClose }: Props) {
             </button>
             {testResult && <TestResultView result={testResult} />}
           </div>
+
+          {testResult?.unknown_host && (
+            <UnknownHostPanel
+              info={testResult.unknown_host}
+              trusting={trusting}
+              onTrust={onTrustUnknown}
+              onCancel={() => setTestResult(null)}
+            />
+          )}
+
+          {testResult?.host_key_changed && (
+            <HostKeyChangedPanel info={testResult.host_key_changed} />
+          )}
 
           {topErr && (
             <div className="text-[12px] text-red-300 flex items-start gap-1.5">
@@ -416,5 +465,118 @@ function Input({
       placeholder={placeholder}
       className="w-full px-3 py-2 rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] text-[13px] font-mono placeholder:opacity-40 focus:outline-none focus:border-[color:var(--color-accent)]/60"
     />
+  );
+}
+
+function UnknownHostPanel({
+  info,
+  trusting,
+  onTrust,
+  onCancel,
+}: {
+  info: UnknownHostInfo;
+  trusting: boolean;
+  onTrust: (info: UnknownHostInfo) => void;
+  onCancel: () => void;
+}) {
+  const [showFull, setShowFull] = useState(false);
+  return (
+    <div className="rounded border border-amber-500/60 bg-amber-500/5 p-3 space-y-2">
+      <div className="flex items-start gap-2">
+        <ShieldAlert className="w-4 h-4 mt-0.5 flex-shrink-0 text-amber-300" />
+        <div className="text-[12px] leading-snug">
+          <div className="font-semibold text-amber-200">Unknown host</div>
+          <div className="text-[color:var(--color-text-dim)] mt-0.5">
+            This is the first time you're connecting to{" "}
+            <code className="font-mono px-1 rounded bg-[color:var(--color-surface-2)]">
+              {info.host}:{info.port}
+            </code>
+            . Verify the fingerprint below matches what your devbox admin (or{" "}
+            <code className="font-mono">ssh-keyscan</code>) reports before trusting.
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-[80px_1fr] gap-x-3 gap-y-1 text-[11px] font-mono pl-6">
+        <span className="text-[color:var(--color-text-dim)]">key type</span>
+        <span>{info.key_type}</span>
+        <span className="text-[color:var(--color-text-dim)]">fingerprint</span>
+        <span className="break-all">{info.fingerprint}</span>
+      </div>
+      <div className="pl-6">
+        <button
+          type="button"
+          onClick={() => setShowFull((v) => !v)}
+          className="text-[11px] text-[color:var(--color-text-dim)] hover:text-[color:var(--color-text)] underline-offset-2 hover:underline"
+        >
+          {showFull ? "Hide full key" : "Show full key"}
+        </button>
+        {showFull && (
+          <pre className="mt-1 p-2 text-[10px] font-mono whitespace-pre-wrap break-all bg-[color:var(--color-surface-2)] rounded border border-[color:var(--color-border)]">
+            {info.raw_openssh}
+          </pre>
+        )}
+      </div>
+      <div className="flex items-center gap-2 pl-6 pt-1">
+        <button
+          type="button"
+          onClick={() => onTrust(info)}
+          disabled={trusting}
+          className="px-2.5 py-1 rounded text-[11px] font-medium bg-amber-500/80 text-black hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+        >
+          {trusting ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <ShieldCheck className="w-3 h-3" />
+          )}
+          Trust and add to known_hosts
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={trusting}
+          className="px-2.5 py-1 rounded text-[11px] text-[color:var(--color-text-dim)] hover:text-[color:var(--color-text)] disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function HostKeyChangedPanel({ info }: { info: HostKeyChangedInfo }) {
+  const cmd = `ssh-keygen -R '${info.host}'`;
+  return (
+    <div className="rounded border border-red-500/70 bg-red-500/10 p-3 space-y-2">
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0 text-red-300" />
+        <div className="text-[12px] leading-snug">
+          <div className="font-semibold text-red-200">Host key changed</div>
+          <div className="text-[color:var(--color-text-dim)] mt-0.5">
+            The key{" "}
+            <code className="font-mono px-1 rounded bg-[color:var(--color-surface-2)]">
+              {info.host}:{info.port}
+            </code>{" "}
+            is presenting does not match the one in{" "}
+            <code className="font-mono">~/.ssh/known_hosts</code> (line {info.known_hosts_line}).
+            This could be a re-imaged box — or someone in the middle. Confirm with the host owner
+            before doing anything else.
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-[80px_1fr] gap-x-3 gap-y-1 text-[11px] font-mono pl-6">
+        <span className="text-[color:var(--color-text-dim)]">offered</span>
+        <span className="break-all">{info.fingerprint_offered}</span>
+        <span className="text-[color:var(--color-text-dim)]">known</span>
+        <span className="break-all">{info.fingerprint_known}</span>
+      </div>
+      <div className="pl-6 space-y-1">
+        <div className="text-[11px] text-[color:var(--color-text-dim)]">
+          To re-trust after verifying out-of-band, remove the stale entry first:
+        </div>
+        <code className="block font-mono text-[11px] px-2 py-1 bg-[color:var(--color-surface-2)] rounded border border-[color:var(--color-border)] select-all">
+          {cmd}
+        </code>
+      </div>
+    </div>
   );
 }

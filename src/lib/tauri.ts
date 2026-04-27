@@ -57,6 +57,10 @@ export const tauri = {
   listSshHosts: () => invoke<SshHostEntry[]>("list_ssh_hosts"),
   testSshConnection: (args: TestSshArgs) =>
     invoke<TestResult>("test_ssh_connection", { args }),
+  confirmUnknownHost: (host: string, port: number, expectedFingerprint: string) =>
+    invoke<void>("confirm_unknown_host", {
+      args: { host, port, expected_fingerprint: expectedFingerprint },
+    }),
   addRemoteWatch: (args: AddRemoteWatchArgs) =>
     invoke<Watch>("add_remote_watch", { args }),
   fetchRemoteFile: (watchId: string, absPath: string) =>

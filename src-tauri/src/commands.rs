@@ -1,10 +1,13 @@
 use crate::fs_watcher;
 use crate::persistence;
-use crate::ssh::{self, cache, config as ssh_config, connection, registry::RemoteKey, watcher as ssh_watcher};
+use crate::ssh::{
+    self, cache, config as ssh_config, connection, known_hosts, registry::RemoteKey,
+    watcher as ssh_watcher,
+};
 use crate::state::{mark_history_dirty, AppState, WatchHandle};
 use crate::types::{
-    InitialState, RecentRemote, RemoteDirListing, SshAgentProbe, SshHostEntry, TestResult,
-    TestStage, VizGone, VizItem, Watch, WatchSource, WatchStatus,
+    HostKeyChangedInfo, InitialState, RecentRemote, RemoteDirListing, SshAgentProbe, SshHostEntry,
+    TestResult, TestStage, UnknownHostInfo, VizGone, VizItem, Watch, WatchSource, WatchStatus,
 };
 use chrono::Utc;
 use globset::Glob;
@@ -232,6 +235,8 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
                 authenticated: skip_stage(),
                 path_exists: skip_stage(),
                 matched: skip_stage(),
+                unknown_host: None,
+                host_key_changed: None,
             };
         }
         Err(_) => {
@@ -240,9 +245,78 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
                 authenticated: skip_stage(),
                 path_exists: skip_stage(),
                 matched: skip_stage(),
+                unknown_host: None,
+                host_key_changed: None,
             };
         }
     };
+
+    // Stage 1.5 — Host-key probe + verification. We do this BEFORE attempting auth so the
+    // user never sends agent-signed challenges to an unverified host. Strict policy will
+    // reject anyway, but the explicit probe gives us a fingerprint to show.
+    let host_for_probe = resolved.host_name.clone();
+    let probed_key = match connection::probe_host_key(&host_for_probe, port).await {
+        Ok(k) => k,
+        Err(e) => {
+            return TestResult {
+                reachable,
+                authenticated: err_stage(format!("host-key probe failed: {e}")),
+                path_exists: skip_stage(),
+                matched: skip_stage(),
+                unknown_host: None,
+                host_key_changed: None,
+            };
+        }
+    };
+
+    let kh_files = known_hosts::default_files();
+    let kh_paths: Vec<&std::path::Path> = kh_files.iter().map(|p| p.as_path()).collect();
+    let verdict = known_hosts::verify_host(&kh_paths, &host_for_probe, port, &probed_key);
+
+    match &verdict {
+        known_hosts::HostVerdict::Match => {
+            // Continue to auth.
+        }
+        known_hosts::HostVerdict::Absent => {
+            let raw = probed_key.to_openssh().unwrap_or_default();
+            let key_type = probed_key.algorithm().as_str().to_string();
+            return TestResult {
+                reachable,
+                authenticated: err_stage("unknown host — confirm to trust"),
+                path_exists: skip_stage(),
+                matched: skip_stage(),
+                unknown_host: Some(UnknownHostInfo {
+                    host: host_for_probe.clone(),
+                    port,
+                    fingerprint: known_hosts::fingerprint(&probed_key),
+                    key_type,
+                    raw_openssh: raw,
+                }),
+                host_key_changed: None,
+            };
+        }
+        known_hosts::HostVerdict::Mismatch { line_no, .. }
+        | known_hosts::HostVerdict::Revoked { line_no, .. } => {
+            // Best-effort: pull the recorded key off the matching line so the UI can show
+            // the "known" fingerprint. If parsing fails we fall back to a placeholder.
+            let known_fp = known_fingerprint_at_line(&kh_files, *line_no)
+                .unwrap_or_else(|| "unknown".to_string());
+            return TestResult {
+                reachable,
+                authenticated: err_stage("host key changed — see ssh-keygen -R"),
+                path_exists: skip_stage(),
+                matched: skip_stage(),
+                unknown_host: None,
+                host_key_changed: Some(HostKeyChangedInfo {
+                    host: host_for_probe.clone(),
+                    port,
+                    fingerprint_offered: known_hosts::fingerprint(&probed_key),
+                    fingerprint_known: known_fp,
+                    known_hosts_line: *line_no as u64,
+                }),
+            };
+        }
+    }
 
     // Stage 2 — Auth via ssh-agent.
     let user_resolved = match user {
@@ -253,6 +327,8 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
                 authenticated: err_stage("no user — set User in ~/.ssh/config or pass explicitly"),
                 path_exists: skip_stage(),
                 matched: skip_stage(),
+                unknown_host: None,
+                host_key_changed: None,
             };
         }
     };
@@ -266,6 +342,8 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
                 authenticated: err_stage(format!("auth: {e}")),
                 path_exists: skip_stage(),
                 matched: skip_stage(),
+                unknown_host: None,
+                host_key_changed: None,
             };
         }
     };
@@ -280,6 +358,8 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
                 authenticated,
                 path_exists: err_stage(format!("sftp open: {e}")),
                 matched: skip_stage(),
+                unknown_host: None,
+                host_key_changed: None,
             };
         }
     };
@@ -291,6 +371,8 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
                 authenticated,
                 path_exists: err_stage(e),
                 matched: skip_stage(),
+                unknown_host: None,
+                host_key_changed: None,
             };
         }
     };
@@ -300,6 +382,8 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
             authenticated,
             path_exists: err_stage(format!("path stat: {e}")),
             matched: skip_stage(),
+            unknown_host: None,
+            host_key_changed: None,
         };
     }
     let path_exists = ok_stage();
@@ -335,7 +419,103 @@ pub async fn test_ssh_connection(args: TestSshArgs) -> TestResult {
         authenticated,
         path_exists,
         matched,
+        unknown_host: None,
+        host_key_changed: None,
     }
+}
+
+#[derive(Deserialize)]
+pub struct ConfirmUnknownHostArgs {
+    pub host: String,
+    pub port: u16,
+    /// Fingerprint the user just confirmed in the dialog. We re-probe and compare to
+    /// guard against a key change between probe-show-confirm.
+    pub expected_fingerprint: String,
+}
+
+/// Append the host's currently-presented key to ~/.ssh/known_hosts after re-confirming the
+/// fingerprint hasn't changed since the user clicked Trust. Idempotent: if the same key has
+/// already been learned (race with another `ssh` invocation, or two open dialogs), returns Ok.
+#[tauri::command]
+pub async fn confirm_unknown_host(args: ConfirmUnknownHostArgs) -> Result<(), String> {
+    // Re-probe live key so a swap between Test and Confirm doesn't slip through.
+    let live_key = connection::probe_host_key(&args.host, args.port)
+        .await
+        .map_err(|e| format!("re-probe failed: {e}"))?;
+    let live_fp = known_hosts::fingerprint(&live_key);
+    if live_fp != args.expected_fingerprint {
+        return Err(format!(
+            "fingerprint changed since you clicked Trust ({} → {}). Aborting — try again.",
+            args.expected_fingerprint, live_fp
+        ));
+    }
+
+    // Re-verify against known_hosts. If the user (or another tool) already trusted this in
+    // a parallel terminal, our work is done.
+    let files = known_hosts::default_files();
+    let paths: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
+    match known_hosts::verify_host(&paths, &args.host, args.port, &live_key) {
+        known_hosts::HostVerdict::Match => return Ok(()),
+        known_hosts::HostVerdict::Mismatch { line_no, file } => {
+            return Err(format!(
+                "known_hosts now has a conflicting key for {} at {}:{} — refusing to overwrite. Run `ssh-keygen -R '{}'` to clear stale entries.",
+                args.host,
+                file.display(),
+                line_no,
+                args.host
+            ));
+        }
+        known_hosts::HostVerdict::Revoked { line_no, file } => {
+            return Err(format!(
+                "known_hosts revokes this host at {}:{} — refusing to trust.",
+                file.display(),
+                line_no
+            ));
+        }
+        known_hosts::HostVerdict::Absent => {}
+    }
+
+    // Append to the primary file (~/.ssh/known_hosts).
+    let primary = files.first().ok_or_else(|| {
+        "no HOME directory available to locate ~/.ssh/known_hosts".to_string()
+    })?;
+    known_hosts::learn_host(primary, &args.host, args.port, &live_key).map_err(|e| match e {
+        known_hosts::LearnError::Conflict(line) => format!(
+            "another entry for this host appeared at line {line} since the probe. Run `ssh-keygen -R '{}'` and try again.",
+            args.host
+        ),
+        other => format!("write known_hosts: {other}"),
+    })?;
+    Ok(())
+}
+
+/// Read the known_hosts file containing the conflict line and compute the fingerprint of the
+/// stored key on that line. Best-effort — returns None on any parse failure so the UI just
+/// shows a placeholder.
+fn known_fingerprint_at_line(files: &[std::path::PathBuf], line_no: usize) -> Option<String> {
+    use russh_keys::parse_public_key_base64;
+    for file in files {
+        let Ok(contents) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let Some(line) = contents.lines().nth(line_no.saturating_sub(1)) else {
+            continue;
+        };
+        // Strip optional `@marker` prefix to isolate the host_field key_type key_b64 columns.
+        let working = line
+            .trim()
+            .strip_prefix('@')
+            .map(|rest| rest.splitn(2, char::is_whitespace).nth(1).unwrap_or(""))
+            .unwrap_or(line.trim());
+        let mut parts = working.split_whitespace();
+        let _host_field = parts.next()?;
+        let _key_type = parts.next()?;
+        let key_b64 = parts.next()?;
+        if let Ok(k) = parse_public_key_base64(key_b64) {
+            return Some(known_hosts::fingerprint(&k));
+        }
+    }
+    None
 }
 
 #[derive(Deserialize)]

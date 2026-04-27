@@ -17,6 +17,8 @@ export type { SshHostEntry } from "./types/bindings/SshHostEntry";
 export type { SshAgentProbe } from "./types/bindings/SshAgentProbe";
 export type { TestResult } from "./types/bindings/TestResult";
 export type { TestStage } from "./types/bindings/TestStage";
+export type { UnknownHostInfo } from "./types/bindings/UnknownHostInfo";
+export type { HostKeyChangedInfo } from "./types/bindings/HostKeyChangedInfo";
 export type { RecentRemote } from "./types/bindings/RecentRemote";
 export type { RemoteDirListing } from "./types/bindings/RemoteDirListing";
 
