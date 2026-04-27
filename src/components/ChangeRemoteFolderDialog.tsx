@@ -1,13 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { AlertTriangle, ArrowUp, FolderOpen, FolderTree, Loader2, X } from "lucide-react";
 import { tauri } from "../lib/tauri";
 import { useVizStore } from "../store/vizStore";
-import type { RemoteDirListing, Watch } from "../types";
+import type { Watch } from "../types";
 
 interface Props {
   watch: Watch;
   onClose: () => void;
 }
+
+// Trigger the next-page fetch this many rows before the rendered tail. Five rows of buffer
+// at ~28px each is plenty to keep the list flowing without slamming the backend.
+const PAGE_PREFETCH_BUFFER = 5;
 
 export function ChangeRemoteFolderDialog({ watch, onClose }: Props) {
   if (watch.source.kind !== "ssh") {
@@ -15,20 +20,35 @@ export function ChangeRemoteFolderDialog({ watch, onClose }: Props) {
   }
   const replaceWatch = useVizStore((s) => s.replaceWatch);
 
-  const [listing, setListing] = useState<RemoteDirListing | null>(null);
-  // Decoupled from `listing.current`: typed edits shouldn't trigger a network round-trip until
-  // the user submits or hits Enter, otherwise every keystroke fires a list_remote_dirs.
+  const [current, setCurrent] = useState<string>("");
+  const [parent, setParent] = useState<string | null>(null);
+  const [entries, setEntries] = useState<string[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  // Decoupled from `current`: typed edits shouldn't trigger a network round-trip until the
+  // user submits or hits Enter, otherwise every keystroke fires a list_remote_dirs.
   const [draftPath, setDraftPath] = useState(watch.source.remote_path);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Track the path whose pagination is currently in flight so a stale loadMore() callback
+  // can't append rows belonging to a directory the user already navigated away from.
+  const activePathRef = useRef<string>("");
+
+  const parentRef = useRef<HTMLDivElement | null>(null);
+
   const load = async (path: string | null) => {
     setLoading(true);
+    setLoadingMore(false);
     setErr(null);
     try {
-      const r = await tauri.listRemoteDirs(watch.id, path);
-      setListing(r);
+      const r = await tauri.listRemoteDirs(watch.id, path, null, null);
+      activePathRef.current = r.current;
+      setCurrent(r.current);
+      setParent(r.parent);
+      setEntries(r.entries);
+      setNextCursor(r.next_cursor);
       setDraftPath(r.current);
     } catch (e) {
       setErr(String(e));
@@ -37,8 +57,25 @@ export function ChangeRemoteFolderDialog({ watch, onClose }: Props) {
     }
   };
 
+  const loadMore = async () => {
+    if (loadingMore || !nextCursor) return;
+    const pathAtRequest = activePathRef.current;
+    setLoadingMore(true);
+    try {
+      const r = await tauri.listRemoteDirs(watch.id, pathAtRequest, nextCursor, null);
+      // If the user navigated elsewhere mid-flight, drop the stale page on the floor.
+      if (activePathRef.current !== pathAtRequest) return;
+      setEntries((prev) => [...prev, ...r.entries]);
+      setNextCursor(r.next_cursor);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
   useEffect(() => {
-    load(watch.source.kind === "ssh" ? watch.source.remote_path : null);
+    void load(watch.source.kind === "ssh" ? watch.source.remote_path : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -47,7 +84,7 @@ export function ChangeRemoteFolderDialog({ watch, onClose }: Props) {
   };
 
   const onUseThisFolder = async () => {
-    const target = draftPath.trim() || (listing?.current ?? "");
+    const target = draftPath.trim() || current;
     if (!target) return;
     setBusy(true);
     setErr(null);
@@ -60,6 +97,28 @@ export function ChangeRemoteFolderDialog({ watch, onClose }: Props) {
       setBusy(false);
     }
   };
+
+  // One row in the virtualizer per directory entry. The ".." row and the loading footer
+  // sit *outside* the virtualizer so they don't fight for keyboard / scroll position.
+  const virtualizer = useVirtualizer({
+    count: entries.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 28,
+    overscan: 6,
+  });
+
+  // Index-based prefetch: when the virtualizer renders any row near the tail, pull the
+  // next page. Avoids IntersectionObserver wiring entirely.
+  const virtualItems = virtualizer.getVirtualItems();
+  useEffect(() => {
+    if (loading || loadingMore || !nextCursor) return;
+    const last = virtualItems[virtualItems.length - 1];
+    if (!last) return;
+    if (last.index >= entries.length - PAGE_PREFETCH_BUFFER) {
+      void loadMore();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [virtualItems, entries.length, nextCursor, loading, loadingMore]);
 
   return (
     <div
@@ -119,7 +178,7 @@ export function ChangeRemoteFolderDialog({ watch, onClose }: Props) {
             </div>
           </div>
 
-          <div className="rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] max-h-[280px] overflow-y-auto">
+          <div className="rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)]">
             {loading && (
               <div className="px-3 py-4 flex items-center gap-2 text-[12px] text-[color:var(--color-text-dim)]">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -127,40 +186,72 @@ export function ChangeRemoteFolderDialog({ watch, onClose }: Props) {
               </div>
             )}
 
-            {!loading && listing && (
-              <div className="py-1">
-                {listing.parent != null && (
+            {!loading && (
+              <>
+                {parent != null && (
                   <button
                     type="button"
-                    onClick={() => navigate(listing.parent!)}
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-[color:var(--color-surface-2)]"
+                    onClick={() => navigate(parent)}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-[color:var(--color-surface-2)] border-b border-[color:var(--color-border)]"
                   >
                     <ArrowUp className="w-3.5 h-3.5 text-[color:var(--color-text-dim)]" />
                     <span className="font-mono text-[color:var(--color-text-dim)]">..</span>
                   </button>
                 )}
-                {listing.dirs.length === 0 && listing.parent == null && (
+
+                {entries.length === 0 && parent == null && (
                   <div className="px-3 py-3 text-[12px] text-[color:var(--color-text-dim)]">
                     No subdirectories.
                   </div>
                 )}
-                {listing.dirs.map((d) => {
-                  const next = listing.current.endsWith("/")
-                    ? `${listing.current}${d}`
-                    : `${listing.current}/${d}`;
-                  return (
-                    <button
-                      key={d}
-                      type="button"
-                      onClick={() => navigate(next)}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-[color:var(--color-surface-2)] text-left"
+
+                {entries.length > 0 && (
+                  <div
+                    ref={parentRef}
+                    className="max-h-[280px] overflow-y-auto overscroll-contain"
+                  >
+                    <div
+                      style={{
+                        height: `${virtualizer.getTotalSize()}px`,
+                        position: "relative",
+                      }}
                     >
-                      <FolderOpen className="w-3.5 h-3.5 text-[color:var(--color-accent)]/80" />
-                      <span className="font-mono">{d}</span>
-                    </button>
-                  );
-                })}
-              </div>
+                      {virtualItems.map((vRow) => {
+                        const d = entries[vRow.index];
+                        if (d === undefined) return null;
+                        const next = current.endsWith("/")
+                          ? `${current}${d}`
+                          : `${current}/${d}`;
+                        return (
+                          <button
+                            key={`${vRow.index}-${d}`}
+                            type="button"
+                            onClick={() => navigate(next)}
+                            style={{
+                              position: "absolute",
+                              top: 0,
+                              left: 0,
+                              right: 0,
+                              transform: `translateY(${vRow.start}px)`,
+                              height: `${vRow.size}px`,
+                            }}
+                            className="flex items-center gap-2 px-3 text-[12px] hover:bg-[color:var(--color-surface-2)] text-left"
+                          >
+                            <FolderOpen className="w-3.5 h-3.5 text-[color:var(--color-accent)]/80" />
+                            <span className="font-mono truncate">{d}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {loadingMore && (
+                      <div className="px-3 py-2 flex items-center gap-2 text-[11px] text-[color:var(--color-text-dim)] border-t border-[color:var(--color-border)]">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Loading more…
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </div>
 
