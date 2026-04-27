@@ -167,7 +167,9 @@ pub async fn cold_scan(app: &AppHandle, state: &Arc<AppState>, watch_id: &str, r
     let take_from = found.len().saturating_sub(50);
     let mut any_new = false;
     for (path, meta) in found.into_iter().skip(take_from) {
-        let fresh = build_item(watch_id, root, &path, &meta);
+        let Some(fresh) = build_item(watch_id, root, &path, &meta) else {
+            continue;
+        };
         let key = (watch_id.to_string(), fresh.abs_path.clone());
         let (merged, was_present) = upsert_preserving_enrichment(state, key, fresh);
         let is_new = !was_present;
@@ -253,7 +255,13 @@ async fn process_event(
             if meta.len() != size1 {
                 return;
             }
-            let fresh = build_item(watch_id, root, &path, &meta);
+            let Some(fresh) = build_item(watch_id, root, &path, &meta) else {
+                eprintln!(
+                    "warn: fs_watcher: build_item rejected unexpected path {}",
+                    path.display()
+                );
+                return;
+            };
             let key = (watch_id.to_string(), fresh.abs_path.clone());
             let (merged, was_present) = upsert_preserving_enrichment(state, key, fresh);
             if was_present {
@@ -302,7 +310,13 @@ async fn handle_remove(app: &AppHandle, state: &Arc<AppState>, watch_id: &str, p
     }
 }
 
-fn build_item(watch_id: &str, root: &Path, path: &Path, meta: &std::fs::Metadata) -> VizItem {
+fn build_item(
+    watch_id: &str,
+    root: &Path,
+    path: &Path,
+    meta: &std::fs::Metadata,
+) -> Option<VizItem> {
+    let kind = VizKind::from_path(path)?;
     let abs = path.to_string_lossy().into_owned();
     let rel = path
         .strip_prefix(root)
@@ -318,12 +332,11 @@ fn build_item(watch_id: &str, root: &Path, path: &Path, meta: &std::fs::Metadata
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or_else(|| Utc::now().timestamp_millis());
-    VizItem {
+    Some(VizItem {
         watch_id: watch_id.to_string(),
         abs_path: abs,
         rel_path: rel,
-        kind: VizKind::from_path(path)
-            .expect("watcher already filtered to known kinds via VizKind::from_path"),
+        kind,
         size: meta.len(),
         mtime,
         prompt: None,
@@ -331,7 +344,7 @@ fn build_item(watch_id: &str, root: &Path, path: &Path, meta: &std::fs::Metadata
         session_id: None,
         cwd: None,
         status: VizStatus::Active,
-    }
+    })
 }
 
 fn is_skippable_dir(path: &Path) -> bool {
@@ -361,4 +374,32 @@ fn is_skippable_dir(path: &Path) -> bool {
                 | "static"
         )
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn build_item_returns_none_for_unknown_extension() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("notes.txt");
+        fs::write(&path, b"hello").expect("write txt");
+        let meta = fs::metadata(&path).expect("metadata");
+        assert!(build_item("watch-1", dir.path(), &path, &meta).is_none());
+    }
+
+    #[test]
+    fn build_item_returns_some_for_png() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("plot.png");
+        fs::write(&path, b"\x89PNG\r\n").expect("write png");
+        let meta = fs::metadata(&path).expect("metadata");
+        let item = build_item("watch-1", dir.path(), &path, &meta).expect("some item");
+        assert_eq!(item.kind, VizKind::Png);
+        assert_eq!(item.watch_id, "watch-1");
+        assert_eq!(item.rel_path, "plot.png");
+    }
 }

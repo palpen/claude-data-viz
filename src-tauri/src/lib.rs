@@ -27,7 +27,7 @@ const HISTORY_FLUSH_INTERVAL_MS: u64 = 500;
 pub fn run() {
     let app_state = AppState::new();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -145,9 +145,12 @@ pub fn run() {
             commands::forget_recent_remote,
             commands::update_remote_watch_path,
             commands::list_remote_dirs,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        ]);
+
+    if let Err(e) = builder.run(tauri::generate_context!()) {
+        eprintln!("fatal: tauri runtime exited with error: {e:#}");
+        std::process::exit(1);
+    }
 }
 
 /// Returns the number of persisted items that were dropped (orphaned from a removed watch, or
