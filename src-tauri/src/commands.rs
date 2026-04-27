@@ -510,6 +510,7 @@ pub async fn fetch_remote_file(
     let local = cache::fetch_file(
         &app,
         &state.fetch_locks,
+        &state.fetch_semaphore,
         &watch_id,
         &conn,
         &abs_path,
@@ -524,6 +525,7 @@ pub async fn fetch_remote_file(
         if let Err(e) = cache::fetch_html_siblings(
             &app,
             &state.fetch_locks,
+            &state.fetch_semaphore,
             &watch_id,
             &conn,
             &abs_path,

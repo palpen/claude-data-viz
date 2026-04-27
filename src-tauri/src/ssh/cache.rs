@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tauri::{AppHandle, Manager};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 const TOTAL_CAP_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB
 const FETCH_CHUNK_BYTES: usize = 64 * 1024;
@@ -67,15 +67,27 @@ impl FetchLocks {
 /// Fetch (or no-op cache hit) a single file. Returns the local path the asset protocol can
 /// serve. The remote `metadata` (mtime, size) is used for cache validation — if local matches,
 /// no SFTP download.
+///
+/// `sem` is a global concurrency cap on SFTP fetches. Acquired BEFORE the per-key mutex so a
+/// burst of 100 distinct items doesn't fan out 100 channels (OpenSSH `MaxSessions=10`).
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_file(
     app: &AppHandle,
     locks: &FetchLocks,
+    sem: &Arc<Semaphore>,
     watch_id: &str,
     conn: &Arc<RemoteConnection>,
     remote_path: &str,
     remote_mtime_ms: i64,
     remote_size: u64,
 ) -> Result<PathBuf> {
+    // Acquire global permit FIRST. Drop on every exit path (success, error, panic).
+    let _permit = sem
+        .clone()
+        .acquire_owned()
+        .await
+        .context("fetch semaphore closed")?;
+
     let local = local_path(app, watch_id, remote_path)?;
     let lock_key = format!("{}::{}", watch_id, remote_path);
     let lock = locks.lock_for(&lock_key);
@@ -99,10 +111,11 @@ pub async fn fetch_file(
 }
 
 /// Optionally fetch HTML siblings (depth=1, same dir, capped). Best-effort: failures don't
-/// abort the primary fetch.
+/// abort the primary fetch. Siblings respect the same global SFTP semaphore as primary fetches.
 pub async fn fetch_html_siblings(
     app: &AppHandle,
     locks: &FetchLocks,
+    sem: &Arc<Semaphore>,
     watch_id: &str,
     conn: &Arc<RemoteConnection>,
     html_remote_path: &str,
@@ -154,7 +167,7 @@ pub async fn fetch_html_siblings(
             .mtime
             .map(|t| (t as i64).saturating_mul(1000))
             .unwrap_or(0);
-        match fetch_file(app, locks, watch_id, conn, &remote_path, mtime_ms, size).await {
+        match fetch_file(app, locks, sem, watch_id, conn, &remote_path, mtime_ms, size).await {
             Ok(_) => {
                 fetched += 1;
                 bytes += size;
@@ -167,13 +180,40 @@ pub async fn fetch_html_siblings(
     Ok(fetched)
 }
 
+/// Lightweight, pure view of the metadata bits we use for cache validation. Keeps
+/// `is_cache_valid` testable without touching the filesystem.
+pub(crate) struct CacheMetaView {
+    pub size: u64,
+    pub mtime_ms: i64,
+}
+
+/// Pure cache-validity predicate. Sized-then-mtime check that tolerates coarse-grained mtime
+/// reporting (NFS at 2s, FAT/SSHFS combos) while still bailing on truly stale or
+/// implausibly-far-future local files.
+///
+/// Rules:
+///   1. size must match exactly,
+///   2. local mtime must be at least the remote mtime (so we never serve a stale local copy),
+///   3. local mtime must not exceed remote mtime by more than 24h (forward-skew cap so a
+///      `touch` far in the future doesn't pin the cache forever).
+pub(crate) fn is_cache_valid(local: &CacheMetaView, remote: &CacheMetaView) -> bool {
+    const FORWARD_SKEW_CAP_MS: i64 = 24 * 3600 * 1000;
+    if local.size != remote.size {
+        return false;
+    }
+    if local.mtime_ms < remote.mtime_ms {
+        return false;
+    }
+    if local.mtime_ms.saturating_sub(remote.mtime_ms) > FORWARD_SKEW_CAP_MS {
+        return false;
+    }
+    true
+}
+
 fn cache_hit(local: &Path, remote_mtime_ms: i64, remote_size: u64) -> bool {
     let Ok(meta) = std::fs::metadata(local) else {
         return false;
     };
-    if meta.len() != remote_size {
-        return false;
-    }
     let Ok(mtime) = meta.modified() else {
         return false;
     };
@@ -181,8 +221,16 @@ fn cache_hit(local: &Path, remote_mtime_ms: i64, remote_size: u64) -> bool {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    // Allow ±1s slack — different filesystems round mtime differently.
-    (local_ms - remote_mtime_ms).abs() <= 1000
+    is_cache_valid(
+        &CacheMetaView {
+            size: meta.len(),
+            mtime_ms: local_ms,
+        },
+        &CacheMetaView {
+            size: remote_size,
+            mtime_ms: remote_mtime_ms,
+        },
+    )
 }
 
 async fn download_atomic(sftp: &SftpSession, remote_path: &str, local: &Path) -> Result<()> {
@@ -274,4 +322,196 @@ fn walk<F: FnMut(&Path, &std::fs::Metadata)>(root: &Path, f: &mut F) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+
+    // ---- is_cache_valid (pure) -----------------------------------------------------------
+
+    #[test]
+    fn is_cache_valid_size_mismatch() {
+        let local = CacheMetaView {
+            size: 100,
+            mtime_ms: 1_000_000,
+        };
+        let remote = CacheMetaView {
+            size: 200,
+            mtime_ms: 1_000_000,
+        };
+        assert!(!is_cache_valid(&local, &remote));
+    }
+
+    #[test]
+    fn is_cache_valid_mtime_equal() {
+        let local = CacheMetaView {
+            size: 4096,
+            mtime_ms: 1_700_000_000_000,
+        };
+        let remote = CacheMetaView {
+            size: 4096,
+            mtime_ms: 1_700_000_000_000,
+        };
+        assert!(is_cache_valid(&local, &remote));
+    }
+
+    #[test]
+    fn is_cache_valid_local_newer() {
+        // Local mtime up to 24h ahead of remote is fine — covers coarse mtime + small skew.
+        let remote_ms: i64 = 1_700_000_000_000;
+        let local = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms + 5_000, // 5s ahead
+        };
+        let remote = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms,
+        };
+        assert!(is_cache_valid(&local, &remote));
+    }
+
+    #[test]
+    fn is_cache_valid_local_older() {
+        // Local strictly older than remote — file changed upstream, must re-fetch.
+        let remote_ms: i64 = 1_700_000_000_000;
+        let local = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms - 1,
+        };
+        let remote = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms,
+        };
+        assert!(!is_cache_valid(&local, &remote));
+    }
+
+    #[test]
+    fn is_cache_valid_size_zero_edge_case() {
+        // Both zero, equal mtime → valid.
+        let local = CacheMetaView {
+            size: 0,
+            mtime_ms: 1_700_000_000_000,
+        };
+        let remote = CacheMetaView {
+            size: 0,
+            mtime_ms: 1_700_000_000_000,
+        };
+        assert!(is_cache_valid(&local, &remote));
+
+        // Zero local against non-zero remote → invalid.
+        let local_zero = CacheMetaView {
+            size: 0,
+            mtime_ms: 1_700_000_000_000,
+        };
+        let remote_nonzero = CacheMetaView {
+            size: 10,
+            mtime_ms: 1_700_000_000_000,
+        };
+        assert!(!is_cache_valid(&local_zero, &remote_nonzero));
+    }
+
+    #[test]
+    fn is_cache_valid_local_implausibly_far_ahead() {
+        // Local more than 24h ahead of remote → stale (someone touched it into the future).
+        let remote_ms: i64 = 1_700_000_000_000;
+        let twenty_five_hours_ms: i64 = 25 * 3600 * 1000;
+        let local = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms + twenty_five_hours_ms,
+        };
+        let remote = CacheMetaView {
+            size: 1024,
+            mtime_ms: remote_ms,
+        };
+        assert!(!is_cache_valid(&local, &remote));
+    }
+
+    // ---- Semaphore concurrency cap -------------------------------------------------------
+
+    /// Stub work unit standing in for an SFTP fetch: increments an in-flight counter, sleeps,
+    /// decrements. Mirrors fetch_file's permit lifecycle (acquire first, drop on every exit).
+    async fn stub_fetch(
+        sem: Arc<Semaphore>,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    ) -> Result<()> {
+        let _permit = sem
+            .clone()
+            .acquire_owned()
+            .await
+            .context("fetch semaphore closed")?;
+        let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(cur, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        in_flight.fetch_sub(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn semaphore_caps_concurrent_fetches() {
+        let sem = Arc::new(Semaphore::new(4));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let s = sem.clone();
+            let f = in_flight.clone();
+            let p = peak.clone();
+            handles.push(tokio::spawn(async move { stub_fetch(s, f, p).await }));
+        }
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 4, "peak in-flight must equal permit count");
+    }
+
+    #[tokio::test]
+    async fn semaphore_releases_on_error() {
+        let sem = Arc::new(Semaphore::new(1));
+
+        async fn failing(sem: Arc<Semaphore>) -> Result<()> {
+            let _permit = sem
+                .clone()
+                .acquire_owned()
+                .await
+                .context("fetch semaphore closed")?;
+            Err(anyhow!("boom"))
+        }
+
+        // First call errors. Permit must drop.
+        let _ = failing(sem.clone()).await;
+        // Second call must acquire immediately — proves the permit was released.
+        let result = tokio::time::timeout(Duration::from_millis(500), async {
+            let _permit = sem.clone().acquire_owned().await.unwrap();
+        })
+        .await;
+        assert!(result.is_ok(), "permit was not released after Err");
+    }
+
+    #[tokio::test]
+    async fn semaphore_releases_on_panic() {
+        let sem = Arc::new(Semaphore::new(1));
+
+        async fn panicker(sem: Arc<Semaphore>) {
+            let _permit = sem.clone().acquire_owned().await.unwrap();
+            panic!("simulated worker panic");
+        }
+
+        // Run the panicking task in its own JoinHandle so the test survives.
+        let s = sem.clone();
+        let handle = tokio::spawn(async move { panicker(s).await });
+        assert!(handle.await.is_err(), "worker should have panicked");
+
+        // Permit must have dropped when the task unwound.
+        let result = tokio::time::timeout(Duration::from_millis(500), async {
+            let _permit = sem.clone().acquire_owned().await.unwrap();
+        })
+        .await;
+        assert!(result.is_ok(), "permit was not released after panic");
+    }
 }
