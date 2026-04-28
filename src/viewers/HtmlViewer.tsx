@@ -46,7 +46,7 @@ function HtmlView({ item, displayPath }: ViewerProps) {
       <iframe
         title="viz-html"
         src={`${convertFileSrc(absPath)}?v=${mtime}`}
-        sandbox="allow-scripts allow-same-origin"
+        sandbox="allow-scripts"
         className="w-full h-full bg-white"
       />
     );
@@ -60,7 +60,7 @@ function HtmlView({ item, displayPath }: ViewerProps) {
     <iframe
       title="viz-html"
       srcDoc={srcDoc}
-      sandbox="allow-scripts allow-same-origin"
+      sandbox="allow-scripts"
       className="w-full h-full bg-white"
     />
   );
