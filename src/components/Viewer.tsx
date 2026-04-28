@@ -76,12 +76,13 @@ function formatBytes(n: number): string {
 function MoreInfo({ item }: { item: VizItem }) {
   const sessionId = item.session_id;
   const cwd = item.cwd;
+  const transcriptsRoot = useVizStore((s) => s.transcriptsDir?.resolved_path ?? null);
   if (!sessionId && !cwd) return null;
 
   const resumeCmd = sessionId ? `claude --resume ${sessionId}` : null;
   const transcriptPath =
-    sessionId && cwd
-      ? `~/.claude/projects/${cwd.replace(/\//g, "-")}/${sessionId}.jsonl`
+    sessionId && cwd && transcriptsRoot
+      ? `${transcriptsRoot}/${cwd.replace(/\//g, "-")}/${sessionId}.jsonl`
       : null;
 
   return (

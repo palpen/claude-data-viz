@@ -4,6 +4,7 @@ import { useVizStore } from "./store/vizStore";
 import { Sidebar } from "./components/Sidebar";
 import { Viewer } from "./components/Viewer";
 import { TopBar } from "./components/TopBar";
+import { TranscriptsDirBanner } from "./components/TranscriptsDirBanner";
 import { FirstRunPicker } from "./components/FirstRunPicker";
 import { prefetchRemoteFile, invalidateRemoteAsset } from "./components/RemoteAssetGate";
 import { useHotkeys } from "./lib/hotkeys";
@@ -32,6 +33,7 @@ export default function App() {
         watches: initial.watches,
         selected: initial.selected,
         followLatest: initial.follow_latest,
+        transcriptsDir: initial.transcripts_dir,
       });
       unlistens = await Promise.all([
         events.onVizNew((item) => {
@@ -107,6 +109,7 @@ export default function App() {
   return (
     <div className="h-screen flex flex-col overflow-hidden">
       <TopBar />
+      <TranscriptsDirBanner />
       <div className="flex-1 min-h-0 grid grid-rows-1 grid-cols-[300px_minmax(0,1fr)] overflow-hidden">
         <Sidebar />
         <Viewer />

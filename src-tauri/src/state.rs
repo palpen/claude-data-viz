@@ -37,6 +37,10 @@ pub struct AppState {
     /// Most-recent-first list of past remote connections, persisted via prefs.json. Used to
     /// pre-fill the connect dialog so users don't keep retyping the same host/path.
     pub recent_remotes: Mutex<Vec<RecentRemote>>,
+    /// User-set override for the local Claude Code transcripts directory. None means "use the
+    /// resolver precedence" (CLAUDE_CONFIG_DIR/projects, else $HOME/.claude/projects). The
+    /// global tail re-reads this each rescan tick, so changes apply within ~2s.
+    pub claude_history_path: Mutex<Option<String>>,
 }
 
 pub struct WatchHandle {
@@ -61,6 +65,7 @@ impl AppState {
             fetch_semaphore: Arc::new(Semaphore::new(4)),
             history_dirty: AtomicBool::new(false),
             recent_remotes: Mutex::new(Vec::new()),
+            claude_history_path: Mutex::new(None),
         })
     }
 }

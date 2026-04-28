@@ -57,6 +57,7 @@ pub fn run() {
             *state.follow_latest.lock() = prefs.follow_latest;
             *state.selected_id.lock() = prefs.selected.clone();
             *state.recent_remotes.lock() = prefs.recent_remotes.clone();
+            *state.claude_history_path.lock() = prefs.claude_history_path.clone();
             for w in prefs.watches.iter() {
                 state.watches.lock().push(w.clone());
             }
@@ -159,6 +160,7 @@ pub fn run() {
             commands::forget_recent_remote,
             commands::update_remote_watch_path,
             commands::list_remote_dirs,
+            commands::set_claude_history_path,
         ]);
 
     if let Err(e) = builder.run(tauri::generate_context!()) {

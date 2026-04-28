@@ -219,6 +219,36 @@ pub struct InitialState {
     pub items: Vec<VizItem>,
     pub follow_latest: bool,
     pub selected: Option<(String, String)>,
+    pub transcripts_dir: TranscriptsDirInfo,
+}
+
+/// Where the resolved local transcripts root came from. Drives the Settings dialog placeholder
+/// label so users can see at a glance whether their `CLAUDE_CONFIG_DIR` is being honored.
+#[derive(Debug, Clone, Copy, Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub enum TranscriptsDirSource {
+    Override,
+    Env,
+    Default,
+}
+
+/// Snapshot of the local transcripts directory state. Sent to the frontend on hydrate and
+/// after `set_claude_history_path` so the Settings dialog and the missing/empty banner
+/// always reflect what the backend resolver actually picked.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "../../src/types/bindings/")]
+pub struct TranscriptsDirInfo {
+    /// The user-set override from prefs.json, verbatim. None if no override.
+    pub override_path: Option<String>,
+    /// The absolute path the resolver picked after running the precedence chain.
+    pub resolved_path: String,
+    pub source: TranscriptsDirSource,
+    /// Filesystem check: does `resolved_path` exist as a directory right now?
+    pub exists: bool,
+    /// True iff `resolved_path` exists AND contains at least one .jsonl file in any
+    /// immediate subdirectory. Used to surface "configured but empty" as a banner.
+    pub has_jsonl: bool,
 }
 
 /// One past remote connection. The dedup key is the full tuple — same host, different paths

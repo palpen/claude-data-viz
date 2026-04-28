@@ -8,6 +8,7 @@ import type {
   SshAgentProbe,
   SshHostEntry,
   TestResult,
+  TranscriptsDirInfo,
   VizEnriched,
   VizEvicted,
   VizGone,
@@ -86,6 +87,8 @@ export const tauri = {
       cursor: cursor ?? null,
       limit: limit ?? null,
     }),
+  setClaudeHistoryPath: (path: string | null) =>
+    invoke<TranscriptsDirInfo>("set_claude_history_path", { path }),
 };
 
 export const events = {
