@@ -3,6 +3,7 @@ import { subscribeWithSelector } from "zustand/middleware";
 import {
   itemId,
   type ItemId,
+  type TranscriptsDirInfo,
   type VizEnriched,
   type VizEvicted,
   type VizGone,
@@ -22,10 +23,15 @@ interface State {
   activeWatchId: string | null;
   followLatest: boolean;
   hydrated: boolean;
+  /// Snapshot of the local Claude Code transcripts directory. Refreshed on hydrate and after
+  /// the user changes the override via Settings. Drives the Settings dialog placeholder and
+  /// the missing/empty banner.
+  transcriptsDir: TranscriptsDirInfo | null;
 }
 
 interface Actions {
-  hydrate: (s: { items: VizItem[]; watches: Watch[]; selected: [string, string] | null; followLatest: boolean }) => void;
+  hydrate: (s: { items: VizItem[]; watches: Watch[]; selected: [string, string] | null; followLatest: boolean; transcriptsDir: TranscriptsDirInfo }) => void;
+  setTranscriptsDir: (info: TranscriptsDirInfo) => void;
   addItem: (item: VizItem) => void;
   updateItem: (u: VizUpdated) => void;
   enrichItem: (e: VizEnriched) => void;
@@ -57,8 +63,9 @@ export const useVizStore = create<State & Actions>()(
     activeWatchId: null,
     followLatest: true,
     hydrated: false,
+    transcriptsDir: null,
 
-    hydrate: ({ items, watches, selected, followLatest }) => {
+    hydrate: ({ items, watches, selected, followLatest, transcriptsDir }) => {
       const map: Record<ItemId, VizItem> = {};
       for (const it of items) {
         map[itemId(it.watch_id, it.abs_path)] = it;
@@ -72,8 +79,11 @@ export const useVizStore = create<State & Actions>()(
         selectedId: sel && map[sel] ? sel : order[0] ?? null,
         followLatest,
         hydrated: true,
+        transcriptsDir,
       });
     },
+
+    setTranscriptsDir: (info) => set({ transcriptsDir: info }),
 
     addItem: (item) => {
       const id = itemId(item.watch_id, item.abs_path);

@@ -5,9 +5,11 @@ use crate::ssh::{
     watcher as ssh_watcher,
 };
 use crate::state::{mark_history_dirty, AppState, WatchHandle};
+use crate::transcript;
 use crate::types::{
     HostKeyChangedInfo, InitialState, RecentRemote, RemoteDirListing, SshAgentProbe, SshHostEntry,
-    TestResult, TestStage, UnknownHostInfo, VizGone, VizItem, Watch, WatchSource, WatchStatus,
+    TestResult, TestStage, TranscriptsDirInfo, UnknownHostInfo, VizGone, VizItem, Watch,
+    WatchSource, WatchStatus,
 };
 use chrono::Utc;
 use globset::Glob;
@@ -30,7 +32,37 @@ pub fn get_state(state: State<Arc<AppState>>) -> InitialState {
         items,
         follow_latest: *state.follow_latest.lock(),
         selected: state.selected_id.lock().clone(),
+        transcripts_dir: transcript::transcripts_dir_info(state.inner()),
     }
+}
+
+/// Set or clear the user override for the local Claude Code transcripts directory. `None` (or
+/// an empty/whitespace string) clears the override and falls back through the precedence
+/// chain. Validates that the resolved path exists as a directory before persisting — an
+/// override pointing nowhere would just create a confusing silent failure.
+#[tauri::command]
+pub fn set_claude_history_path(
+    app: AppHandle,
+    state: State<Arc<AppState>>,
+    path: Option<String>,
+) -> Result<TranscriptsDirInfo, String> {
+    let normalized = path.and_then(|p| {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    if let Some(p) = &normalized {
+        let meta = std::fs::metadata(p).map_err(|e| format!("path: {e}"))?;
+        if !meta.is_dir() {
+            return Err("path is not a directory".to_string());
+        }
+    }
+    *state.claude_history_path.lock() = normalized;
+    persistence::save_prefs(&app, state.inner());
+    Ok(transcript::transcripts_dir_info(state.inner()))
 }
 
 #[derive(Deserialize)]

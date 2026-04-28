@@ -17,6 +17,8 @@ pub struct PersistedPrefs {
     pub selected: Option<(String, String)>,
     #[serde(default)]
     pub recent_remotes: Vec<RecentRemote>,
+    #[serde(default)]
+    pub claude_history_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -100,6 +102,7 @@ pub fn save_prefs(app: &AppHandle, state: &Arc<AppState>) {
         follow_latest: *state.follow_latest.lock(),
         selected: state.selected_id.lock().clone(),
         recent_remotes: state.recent_remotes.lock().clone(),
+        claude_history_path: state.claude_history_path.lock().clone(),
     };
     write_json(&path, &snap);
 }

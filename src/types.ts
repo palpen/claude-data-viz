@@ -21,6 +21,8 @@ export type { UnknownHostInfo } from "./types/bindings/UnknownHostInfo";
 export type { HostKeyChangedInfo } from "./types/bindings/HostKeyChangedInfo";
 export type { RecentRemote } from "./types/bindings/RecentRemote";
 export type { RemoteDirListing } from "./types/bindings/RemoteDirListing";
+export type { TranscriptsDirInfo } from "./types/bindings/TranscriptsDirInfo";
+export type { TranscriptsDirSource } from "./types/bindings/TranscriptsDirSource";
 
 export type ItemId = string;
 export const itemId = (watch_id: string, abs_path: string): ItemId =>

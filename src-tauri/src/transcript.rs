@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncSeekExt;
 
 use crate::state::{mark_history_dirty, AppState};
-use crate::types::VizEnriched;
+use crate::types::{TranscriptsDirInfo, TranscriptsDirSource, VizEnriched};
 
 const TOOL_RING_CAP: usize = 64;
 const POLL_INTERVAL_MS: u64 = 500;
@@ -174,12 +174,103 @@ pub fn new_index() -> SharedIndex {
     Arc::new(Mutex::new(TranscriptIndex::default()))
 }
 
-/// Resolve `~/.claude/projects/<encoded-cwd>/` for the given absolute working dir.
+/// Pure precedence resolver. Pulled out so unit tests can drive it without mutating process
+/// env vars (which would race other tests under cargo's parallel runner).
+///
+/// Precedence: explicit override (UI-set) > CLAUDE_CONFIG_DIR/projects > $HOME/.claude/projects.
+/// An explicit empty-string env var is treated as unset.
+fn resolve_with(
+    override_path: Option<&str>,
+    env_var: Option<&str>,
+    home: Option<&Path>,
+) -> (PathBuf, TranscriptsDirSource) {
+    if let Some(p) = override_path {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            return (PathBuf::from(trimmed), TranscriptsDirSource::Override);
+        }
+    }
+    if let Some(env) = env_var {
+        let trimmed = env.trim();
+        if !trimmed.is_empty() {
+            return (
+                PathBuf::from(trimmed).join("projects"),
+                TranscriptsDirSource::Env,
+            );
+        }
+    }
+    let home = home.map(Path::to_path_buf).unwrap_or_default();
+    (
+        home.join(".claude").join("projects"),
+        TranscriptsDirSource::Default,
+    )
+}
+
+/// Resolve the local Claude Code transcripts root from current process state. See `resolve_with`
+/// for the precedence rules. Cheap enough to call each rescan tick (string clones + env lookup).
+pub fn resolve_local_projects_dir(state: &AppState) -> PathBuf {
+    let override_path = state.claude_history_path.lock().clone();
+    let env_var = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    let home = home_dir();
+    resolve_with(
+        override_path.as_deref(),
+        env_var.as_deref(),
+        home.as_deref(),
+    )
+    .0
+}
+
+/// Build the `TranscriptsDirInfo` snapshot the frontend hydrates from. Includes the resolved
+/// path, where it came from (override / env / default), and whether the directory currently
+/// exists / contains any .jsonl files. Used by `get_state` and `set_claude_history_path`.
+pub fn transcripts_dir_info(state: &AppState) -> TranscriptsDirInfo {
+    let override_path = state.claude_history_path.lock().clone();
+    let env_var = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    let home = home_dir();
+    let (resolved, source) = resolve_with(
+        override_path.as_deref(),
+        env_var.as_deref(),
+        home.as_deref(),
+    );
+    let exists = resolved.is_dir();
+    let has_jsonl = exists && dir_has_any_jsonl(&resolved);
+    TranscriptsDirInfo {
+        override_path,
+        resolved_path: resolved.to_string_lossy().into_owned(),
+        source,
+        exists,
+        has_jsonl,
+    }
+}
+
+fn dir_has_any_jsonl(root: &Path) -> bool {
+    let Ok(session_dirs) = std::fs::read_dir(root) else {
+        return false;
+    };
+    for sd in session_dirs.flatten() {
+        let dir = sd.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Resolve `<projects-root>/<encoded-cwd>/` for the given absolute working dir, honoring the
+/// configured projects root.
 #[allow(dead_code)]
-pub fn resolve_session_dir(cwd: &Path) -> Option<PathBuf> {
-    let home = home_dir()?;
+pub fn resolve_session_dir(state: &AppState, cwd: &Path) -> Option<PathBuf> {
     let encoded = encode_cwd(cwd);
-    let dir = home.join(".claude").join("projects").join(encoded);
+    let dir = resolve_local_projects_dir(state).join(encoded);
     if dir.is_dir() { Some(dir) } else { None }
 }
 
@@ -205,9 +296,15 @@ pub fn pick_latest_session(dir: &Path) -> Option<PathBuf> {
     best.map(|(p, _)| p)
 }
 
-/// Global tail task: scans every `~/.claude/projects/*/` for recently-active JSONLs and
-/// tails them all into the shared index. Auto-discovers new sessions / new files.
+/// Global tail task: scans the configured Claude Code transcripts root for recently-active
+/// JSONLs and tails them all into the shared index. Auto-discovers new sessions / new files.
 /// Each newly-seen file starts at its current end; only appended lines are processed.
+///
+/// **Path-change semantics**: each rescan tick re-reads the resolved root via
+/// `resolve_local_projects_dir`, so changing the override in Settings is picked up within
+/// one `RESCAN_INTERVAL_TICKS` (~2s). `files.retain` prunes metadata for files outside the
+/// new root, but already-open file handles for old-path files survive until the next
+/// staleness sweep (≤1h `STALE_TAIL_MS`). Restart the app for an immediate cutover.
 pub fn start_global_tail(app: AppHandle, state: Arc<AppState>) {
     let index = state.global_index.clone();
     tauri::async_runtime::spawn(async move {
@@ -224,7 +321,7 @@ pub fn start_global_tail(app: AppHandle, state: Arc<AppState>) {
             tick = tick.wrapping_add(1);
 
             if tick % RESCAN_INTERVAL_TICKS == 1 {
-                active_jsonls = scan_active_jsonls();
+                active_jsonls = scan_active_jsonls(&state);
                 // Drop file state for sessions that have gone idle (free memory).
                 let live: std::collections::HashSet<&PathBuf> = active_jsonls.iter().collect();
                 files.retain(|p, _| live.contains(p));
@@ -288,11 +385,8 @@ pub fn start_global_tail(app: AppHandle, state: Arc<AppState>) {
     });
 }
 
-fn scan_active_jsonls() -> Vec<PathBuf> {
-    let Some(home) = home_dir() else {
-        return Vec::new();
-    };
-    let projects = home.join(".claude").join("projects");
+fn scan_active_jsonls(state: &AppState) -> Vec<PathBuf> {
+    let projects = resolve_local_projects_dir(state);
     let now_ms = Utc::now().timestamp_millis();
     let cutoff_ms = now_ms - STALE_TAIL_MS;
 
@@ -1124,5 +1218,73 @@ mod tests {
         let index = new_index();
         process_line(&index, "{not json");
         assert!(logs_contain("transcript: malformed JSONL line"));
+    }
+
+    #[test]
+    fn resolve_with_default_when_nothing_set() {
+        let home = PathBuf::from("/u/me");
+        let (path, src) = resolve_with(None, None, Some(&home));
+        assert_eq!(path, PathBuf::from("/u/me/.claude/projects"));
+        assert!(matches!(src, TranscriptsDirSource::Default));
+    }
+
+    #[test]
+    fn resolve_with_env_var() {
+        let home = PathBuf::from("/u/me");
+        let (path, src) = resolve_with(None, Some("/alt/claude"), Some(&home));
+        assert_eq!(path, PathBuf::from("/alt/claude/projects"));
+        assert!(matches!(src, TranscriptsDirSource::Env));
+    }
+
+    #[test]
+    fn resolve_with_override() {
+        let home = PathBuf::from("/u/me");
+        let (path, src) = resolve_with(Some("/custom/path"), None, Some(&home));
+        assert_eq!(path, PathBuf::from("/custom/path"));
+        assert!(matches!(src, TranscriptsDirSource::Override));
+    }
+
+    #[test]
+    fn resolve_with_override_wins_over_env() {
+        // Explicit UI action beats inherited environment.
+        let home = PathBuf::from("/u/me");
+        let (path, src) = resolve_with(Some("/custom/path"), Some("/alt/claude"), Some(&home));
+        assert_eq!(path, PathBuf::from("/custom/path"));
+        assert!(matches!(src, TranscriptsDirSource::Override));
+    }
+
+    #[test]
+    fn resolve_with_empty_env_var_treated_as_unset() {
+        // Empty `CLAUDE_CONFIG_DIR=""` from a misconfigured shell shouldn't poison the resolution.
+        let home = PathBuf::from("/u/me");
+        let (path, src) = resolve_with(None, Some(""), Some(&home));
+        assert_eq!(path, PathBuf::from("/u/me/.claude/projects"));
+        assert!(matches!(src, TranscriptsDirSource::Default));
+        let (path, src) = resolve_with(None, Some("   "), Some(&home));
+        assert_eq!(path, PathBuf::from("/u/me/.claude/projects"));
+        assert!(matches!(src, TranscriptsDirSource::Default));
+    }
+
+    #[test]
+    fn resolve_with_empty_override_treated_as_unset() {
+        // Frontend sometimes sends "" instead of null when clearing the field; both should fall
+        // through to the next precedence level.
+        let home = PathBuf::from("/u/me");
+        let (path, src) = resolve_with(Some(""), Some("/alt/claude"), Some(&home));
+        assert_eq!(path, PathBuf::from("/alt/claude/projects"));
+        assert!(matches!(src, TranscriptsDirSource::Env));
+        let (path, src) = resolve_with(Some("  "), None, Some(&home));
+        assert_eq!(path, PathBuf::from("/u/me/.claude/projects"));
+        assert!(matches!(src, TranscriptsDirSource::Default));
+    }
+
+    #[test]
+    fn resolve_with_override_kept_even_if_invalid_path() {
+        // Existence is a separate concern (surfaced via the banner), not a resolver concern.
+        // The resolver returns the user's choice as-is; the caller can fs-check.
+        let home = PathBuf::from("/u/me");
+        let (path, src) = resolve_with(Some("/does/not/exist"), None, Some(&home));
+        assert_eq!(path, PathBuf::from("/does/not/exist"));
+        assert!(matches!(src, TranscriptsDirSource::Override));
     }
 }

@@ -4,6 +4,7 @@ import {
   FolderOpen,
   RefreshCw,
   Server,
+  Settings as SettingsIcon,
   Sparkles,
   Trash2,
   X,
@@ -12,6 +13,7 @@ import {
 import { useVizStore } from "../store/vizStore";
 import { FollowToggle } from "./FollowToggle";
 import { ConnectRemoteDialog } from "./ConnectRemoteDialog";
+import { SettingsDialog } from "./SettingsDialog";
 import { tauri } from "../lib/tauri";
 import { swallowWithLog } from "../lib/log";
 import type { Watch, WatchStatus } from "../types";
@@ -28,6 +30,7 @@ export function TopBar() {
   const clearGalleryStore = useVizStore((s) => s.clearGallery);
 
   const [showRemote, setShowRemote] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [addLocalErr, setAddLocalErr] = useState<string | null>(null);
 
   const onAddLocal = async () => {
@@ -131,8 +134,17 @@ export function TopBar() {
         <Trash2 className="w-3 h-3" />
         Clear
       </button>
+      <button
+        onClick={() => setShowSettings(true)}
+        title="Settings"
+        aria-label="Open settings"
+        className="flex items-center px-1.5 py-1 rounded text-[color:var(--color-text-dim)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-surface-2)] border border-transparent hover:border-[color:var(--color-border)]"
+      >
+        <SettingsIcon className="w-3.5 h-3.5" />
+      </button>
       <FollowToggle active={followLatest} onToggle={onToggleFollow} />
       {showRemote && <ConnectRemoteDialog onClose={() => setShowRemote(false)} />}
+      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
     </div>
   );
 }
